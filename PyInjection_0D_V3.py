@@ -947,7 +947,7 @@ def main():
     parser.add_argument("--no-plot",  action="store_true", help="Disable plot even if sweeping")
 
     # Scelta iniettore
-    parser.add_argument("--injector", choices=["plain","swirl"], default="swirl",
+    parser.add_argument("--injector", choices=["plain","swirl"], default="plain",
                         help="Injector type: plain (orifice) or swirl (pressure-swirl empirical add-on).")
     # Plain orifice: multi-foro
     parser.add_argument("--n-holes", type=int, default=1, help="Number of holes for plain orifice.")
