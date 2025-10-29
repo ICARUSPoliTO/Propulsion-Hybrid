@@ -549,9 +549,8 @@ def nhne_out_state_from_mdot(fluid: str, p1: float, p2: float, T_line: float,
     )
 # ================== WRAPPER MULTI-FORO (plain orifice) ==================
 def run_plain_orifice_case(fluid: str, p1_bar: float, p2_bar: float, T_line: float,
-                           D_input: float, L: float, Cd: float, K_minor: float, rough: float,
+                           D_input: float, L: float, Cd: float,
                            n_holes: int = 1, keep_total_area: bool = True,
-                           include_accel_loss: bool = True, eta_f: float = 0.0,
                            use_spi_compress: bool = False, spi_n: Optional[float] = None) -> dict:
     n = max(1, int(n_holes))
     if n == 1:
@@ -563,10 +562,6 @@ def run_plain_orifice_case(fluid: str, p1_bar: float, p2_bar: float, T_line: flo
             D=D_input,
             L=L,
             Cd=Cd,
-            K_minor=K_minor,
-            rough=rough,
-            include_accel_loss=include_accel_loss,
-            eta_f=eta_f,
             use_spi_compress=use_spi_compress,
             spi_n=spi_n
         )
@@ -582,10 +577,6 @@ def run_plain_orifice_case(fluid: str, p1_bar: float, p2_bar: float, T_line: flo
         D=D_hole,
         L=L,
         Cd=Cd,
-        K_minor=K_minor,
-        rough=rough,
-        include_accel_loss=include_accel_loss,
-        eta_f=eta_f,
         use_spi_compress=use_spi_compress,
         spi_n=spi_n
     )
@@ -669,9 +660,7 @@ def estimate_pressure_swirl_params(fluid: str,
 
 # ================== POST-PROCESS (NHNE baseline) ==================
 def postprocess_case(fluid: str, p1_bar: float, p2_bar: float, T_line: float,
-                     D: float, L: float, Cd: float, K_minor: float, rough: float,
-                     include_accel_loss: bool = True, eta_f: float = 0.0,
-                     use_spi_compress: bool = False, spi_n: Optional[float] = None) -> dict:
+                     D: float, L: float, Cd: float,use_spi_compress: bool = False, spi_n: Optional[float] = None) -> dict:
     p1 = float(p1_bar) * 1e5
     p2 = float(p2_bar) * 1e5
     A  = 0.25 * math.pi * D**2
@@ -783,9 +772,7 @@ def print_inputs_table_en(params: dict) -> None:
         {"k": "D (input)",          "v": f'{params["D"]:.6f} m'},
         {"k": "L",                  "v": f'{params["L"]:.6f} m'},
         {"k": "A (from D)",         "v": f'{0.25*math.pi*params["D"]**2:.8f} m^2'},
-        {"k": "Cd",                 "v": f'{params["Cd"]:.3f}'},
-        {"k": "K_minor (=1/Cd^2)",  "v": f'{(1.0/params["Cd"]**2):.3f}'},
-        {"k": "Relative roughness", "v": f'{params["rough"]:.6f}'},
+        {"k": "Cd",                 "v": f'{params["Cd"]:.4f}'},
         {"k": "P2 (outlet)",        "v": f'{params["p2_bar"]:.3f} bar'},
     ]
     if params.get("injector", "plain") == "plain":
@@ -836,7 +823,6 @@ def print_all_tables_en(results: list) -> None:
         ("mdot_liq [kg/s]", "mdot_liq",  16,  ".5f"),
         ("mdot_gas [kg/s]", "mdot_gas",  16,  ".5f"),
         ("U_out [m/s]",     "U_out",     12,  ".2f"),
-        ("U_mix [m/s]",     "U_mix",     12,  ".2f"),
         ("j_liq [m/s]",     "j_liq",     12,  ".2f"),
         ("j_gas [m/s]",     "j_gas",     12,  ".2f"),
     ]
@@ -912,11 +898,7 @@ class RunConfig:
     D: float
     L: float
     Cd: float
-    K_minor: float
-    rough: float
     p2_bar: float
-    include_accel_loss: bool = True
-    eta_f: float = 0.0
     use_spi_compress: bool = False
     spi_n: Optional[float] = None
 
@@ -925,9 +907,8 @@ def process_one_p1(p1b: float, cfg: RunConfig) -> Tuple[Dict[str, Any], Optional
     if cfg.injector == "plain":
         res = run_plain_orifice_case(
             cfg.fluid, p1b, cfg.p2_bar, cfg.T_line,
-            cfg.D, cfg.L, cfg.Cd, cfg.K_minor, cfg.rough,
+            cfg.D, cfg.L, cfg.Cd,
             n_holes=cfg.n_holes, keep_total_area=cfg.keep_total_area,
-            include_accel_loss=cfg.include_accel_loss, eta_f=cfg.eta_f,
             use_spi_compress=cfg.use_spi_compress, spi_n=cfg.spi_n
         )
         return res, None
@@ -940,17 +921,13 @@ def process_one_p1(p1b: float, cfg: RunConfig) -> Tuple[Dict[str, Any], Optional
             D=cfg.D,
             L=cfg.L,
             Cd=cfg.Cd,
-            K_minor=cfg.K_minor,
-            rough=cfg.rough,
-            include_accel_loss=cfg.include_accel_loss,
-            eta_f=cfg.eta_f,
             use_spi_compress=cfg.use_spi_compress,
             spi_n=cfg.spi_n
         )
         spray = estimate_pressure_swirl_params(
             fluid=cfg.fluid,
             p1=p1b * 1e5, p2=cfg.p2_bar * 1e5, T_line=cfg.T_line,
-            d_orif=cfg.D, mdot_1D=res["mdot_nhne"],  # usa NHNE come mdot di riferimento
+            d_orif=cfg.D, mdot=res["mdot_nhne"],  # usa NHNE come mdot di riferimento
             aircore_factor=cfg.swirl_aircore,
             theta_default_deg=cfg.swirl_theta,
             Csmd=cfg.swirl_Csmd, q_rr=cfg.swirl_qrr,
@@ -968,8 +945,9 @@ def main():
     parser.add_argument("--p1-step",  type=float, default=1.0, help="P1 step  [bar]")
     parser.add_argument("--p1",       type=float, help="Single P1 [bar] (disables plotting)")
     parser.add_argument("--no-plot",  action="store_true", help="Disable plot even if sweeping")
+
     # Scelta iniettore
-    parser.add_argument("--injector", choices=["plain","swirl"], default="plain",
+    parser.add_argument("--injector", choices=["plain","swirl"], default="swirl",
                         help="Injector type: plain (orifice) or swirl (pressure-swirl empirical add-on).")
     # Plain orifice: multi-foro
     parser.add_argument("--n-holes", type=int, default=1, help="Number of holes for plain orifice.")
@@ -981,7 +959,7 @@ def main():
     parser.add_argument("--swirl-Csmd",    type=float, default=2.25, help="SMD constant (tune 1.8–3.0).")
     parser.add_argument("--swirl-qrr",     type=float, default=3.5,  help="Rosin–Rammler q.")
 
-    # NEW: correzione di comprimibilità nello SPI
+    # Correzione di comprimibilità nello SPI (opzionale)
     parser.add_argument("--spi-compress", action="store_true",
                         help="Attiva correzione di comprimibilità nello SPI (Y').")
     parser.add_argument("--spi-n", type=float, default=None,
@@ -989,13 +967,13 @@ def main():
 
     # === INPUT DI BASE (modifica qui per i tuoi default) ===
     fluid  = "NitrousOxide"
-    T_line = 288.0      # K
-    D      = 2e-3       # m (equivalente totale se --keep-total-area)
-    L      = 10e-3      # m
-    Cd     = 0.9875
-    K_minor= 1.0 / (Cd**2)
-    rough  = 1e-5
-    p2_bar = 43.0
+    T_line = 288.0       # K
+    D      = 2e-3        # m (equivalente totale se --keep-total-area)
+    L      = 10e-3       # m
+    Cd     = 0.9875      # coefficiente di scarico (da CFD o sperimentale)
+    p2_bar = 43.0        # bar
+    n_holes = 3          # numero fori default
+    keep_total_area = True  # True = D come diametro equivalente totale
 
     args = parser.parse_args()
     use_spi_compress = bool(args.spi_compress)
@@ -1009,12 +987,21 @@ def main():
     else:
         p1_list_bar = list(np.arange(50.0, 70.0 + 1e-9, 1.0))  # default sweep
 
-    # Tabella input
-    inputs = dict(fluid=fluid, T_line=T_line, D=D, L=L, Cd=Cd, rough=rough, p2_bar=p2_bar,
-                  injector=args.injector, n_holes=args.n_holes, keep_total_area=args.keep_total_area)
+    # Tabella input (niente più K_minor / rough)
+    inputs = dict(
+        fluid=fluid,
+        injector=args.injector,
+        n_holes=n_holes,
+        keep_total_area=keep_total_area,
+        T_line=T_line,
+        D=D,
+        L=L,
+        Cd=Cd,
+        p2_bar=p2_bar
+    )
     print_inputs_table_en(inputs)
-
-    # Config picklable per i worker
+    
+    # Config picklable per i worker (senza perdite)
     cfg = RunConfig(
         injector=args.injector,
         n_holes=args.n_holes,
@@ -1023,8 +1010,7 @@ def main():
         swirl_theta=args.swirl_theta,
         swirl_Csmd=args.swirl_Csmd,
         swirl_qrr=args.swirl_qrr,
-        fluid=fluid, T_line=T_line, D=D, L=L, Cd=Cd, K_minor=K_minor, rough=rough, p2_bar=p2_bar,
-        include_accel_loss=True, eta_f=0.0,
+        fluid=fluid, T_line=T_line, D=D, L=L, Cd=Cd, p2_bar=p2_bar,
         use_spi_compress=use_spi_compress, spi_n=spi_n
     )
 
@@ -1061,7 +1047,7 @@ def main():
             plt.figure(figsize=(10, 6))
             plt.plot(p1, [r["mdot_spi"]   for r in results], 's--', label='mdot_SPI (single-phase)', linewidth=2)
             plt.plot(p1, [r["mdot_hem"]   for r in results], 'd--', label='mdot_HEM (equilibrium two-phase)', linewidth=2)
-            plt.plot(p1, [r["mdot_nhne"]  for r in results], 'o-',  label='mdot_NHNE (baseline)', linewidth=2)
+            plt.plot(p1, [r['mdot_nhne']  for r in results], 'o-',  label='mdot_NHNE (baseline)', linewidth=2)
             plt.xlabel('Inlet Pressure $P_1$ [bar]')
             plt.ylabel(r'Mass Flow Rate $\dot{m}$ [kg/s]')
             plt.title('Mass Flow vs Inlet Pressure')
