@@ -1,3 +1,0 @@
-python PyInjection_0D_V3.py --p1 55  (single point)
-python PyInjection_0D_V3.py --p1-start 55 --p1-stop 65 --p1-step 1 (sweep on p1)
-python PyInjection_0D_V4.py --phase-aware
