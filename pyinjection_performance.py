@@ -4,9 +4,11 @@ pyinjection_performance.py
 
 Single-case plain-orifice N2O injector:
 - usa il backend fisico/termodinamico in pyinjection_core.py
+- può usare un Cd imposto dall'utente oppure stimato dalla geometria
+  tramite il modello geometrico del core
 - stampa tabelle di input, portate e proprietà in uscita.
 
-Questo file non contiene più la fisica dei modelli; è solo un wrapper
+Questo file non contiene la fisica dei modelli; è solo un wrapper
 per la formattazione dell'output.
 """
 
@@ -28,6 +30,7 @@ from pyinjection_core import (
     nhne_out_state_from_mdot,
     _safe_viscosity,
     rho_singlephase_at_T,
+    estimate_Cd_from_geometry,  # Cd geometrico (usa già rho_singlephase_at_T, _safe_viscosity, ecc.)
 )
 
 # ============================================================
@@ -65,12 +68,27 @@ def _print_table(title: str,
 # ============================================================
 
 def print_inputs_table(params: Dict[str, Any]) -> None:
+    """
+    Stampa la tabella degli input usando:
+    - fluid, T_line, P1, P2
+    - geometria: D, L, L/D, r/D, r, area A
+    - Cd, modalità e sorgente (user / geometrico).
+    """
     cols = [
         ("Parametro", "k", 24, "s"),
         ("Valore",    "v", 24, "s"),
     ]
+
     D = params["D"]
+    L = params["L"]
     A = 0.25 * math.pi * D**2
+    L_over_D = L / D if D > 0.0 else float("nan")
+
+    r_over_D = params.get("r_over_D", None)
+    if r_over_D is not None:
+        r_edge = r_over_D * D
+    else:
+        r_edge = None
 
     rows = [
         {"k": "Fluido",           "v": params["fluid"]},
@@ -78,10 +96,26 @@ def print_inputs_table(params: Dict[str, Any]) -> None:
         {"k": "P1 [bar]",         "v": f'{params["p1_bar"]:.3f}'},
         {"k": "P2 [bar]",         "v": f'{params["p2_bar"]:.3f}'},
         {"k": "D orifizio [m]",   "v": f'{D:.6f}'},
-        {"k": "L orifizio [m]",   "v": f'{params["L"]:.6f}'},
-        {"k": "A (da D) [m^2]",   "v": f'{A:.8e}'},
-        {"k": "Cd [-]",           "v": f'{params["Cd"]:.4f}'},
+        {"k": "L orifizio [m]",   "v": f'{L:.6f}'},
+        {"k": "L/D [-]",          "v": f'{L_over_D:.3f}'},
     ]
+
+    # Geometria di raccordo se disponibile
+    if r_over_D is not None:
+        rows.append({"k": "r/D [-]",        "v": f'{r_over_D:.4f}'})
+        rows.append({"k": "r raccordo [m]", "v": f'{r_edge:.6f}'})
+
+    rows.extend([
+        {"k": "Area foro A [m^2]", "v": f'{A:.8e}'},
+        {"k": "Cd [-]",            "v": f'{params["Cd"]:.4f}'},
+    ])
+
+    # modalità e origine del Cd (user / geom)
+    if "Cd_mode" in params:
+        rows.append({"k": "Modalità Cd", "v": params["Cd_mode"]})
+    if "Cd_source" in params:
+        rows.append({"k": "Origine Cd", "v": params["Cd_source"]})
+
     _print_table("TABELLA INPUT - Parametri del caso", cols, rows)
 
 
@@ -120,12 +154,10 @@ def print_phase_properties_table(fluid: str,
     Proprietà in uscita delle singole fasi:
     - se bifase: liquido + vapore (stessa T_out, T_sat, ma j_liq/j_gas, rho, mu, Re)
     - se monofase: unica riga per la fase presente.
-    Include:
-      - alpha (volume fraction)
-      - Cp [J/kg/K]
-      - k  [W/m/K]
-      - MW [kg/kmol]
-      - h  [J/kg]
+
+    Per densità e viscosità si usano le utility del core
+    (rho_singlephase_at_T, _safe_viscosity); CoolProp è usato solo
+    per T_sat, Cp, k, h.
     """
     p2 = p2_bar * 1e5
     try:
@@ -167,7 +199,8 @@ def print_phase_properties_table(fluid: str,
         j_l   = out["j_liq"]
         j_v   = out["j_gas"]
 
-        mu_l  = _safe_viscosity(fluid, p2, phase="liq")
+        # viscosità da core (con T_out)
+        mu_l  = _safe_viscosity(fluid, p2, T_out, phase="liq")
         mu_v  = _safe_viscosity(fluid, p2, T_out, phase="gas")
 
         Re_l  = rho_l * j_l * D / max(mu_l, 1e-12) if rho_l is not None else 0.0
@@ -302,7 +335,6 @@ def print_main_results_table(mdot_pa: float,
     else:
         sigma = 0.0
 
-    # intestazioni corte + larghezze ridotte → tabella più compatta
     cols = [
         ("mdot [kg/s]",  "mdot",  12, ".6f"),
         ("fase",         "phase", 10, "s"),
@@ -354,6 +386,13 @@ def main():
                         help="Orifice length [m] (default: 10.0e-3)")
     parser.add_argument("--Cd", type=float, default=0.9875,
                         help="Discharge coefficient [-] (default: 0.9875)")
+    parser.add_argument("--Cd-mode", type=str, default="user",
+                        choices=["user", "geom"],
+                        help="Modo di determinazione del Cd: "
+                             "'user' = usa --Cd, 'geom' = stima da geometria.")
+    parser.add_argument("--rD", type=float, default=0.05,
+                        help="Edge radius ratio r/D per la stima geometrica del Cd "
+                             "(usato solo se --Cd-mode=geom, ma riportato sempre in tabella).")
     parser.add_argument("--fluid", type=str, default="NitrousOxide",
                         help="Fluid name for CoolProp (default: NitrousOxide)")
     parser.add_argument("--no-compress", action="store_true",
@@ -363,15 +402,34 @@ def main():
 
     args = parser.parse_args()
 
-    fluid   = args.fluid
-    p1_bar  = float(args.p1)
-    p2_bar  = float(args.p2)
-    T_line  = float(args.Tline)
-    D       = float(args.D)
-    L       = float(args.L)
-    Cd      = float(args.Cd)
-    use_spi_compress = not args.no_compress
-    spi_n   = args.spi_n
+    fluid        = args.fluid
+    p1_bar       = float(args.p1)
+    p2_bar       = float(args.p2)
+    T_line       = float(args.Tline)
+    D            = float(args.D)
+    L            = float(args.L)
+    use_spi_comp = not args.no_compress
+    spi_n        = args.spi_n
+    Cd_mode      = args.Cd_mode
+    r_over_D     = args.rD
+
+    # ----- Determinazione Cd -----
+    if Cd_mode == "geom":
+        # Stima Cd (e Re di riferimento) dal core, usando la stessa logica del design tool
+        Cd_geom, Re_ref = estimate_Cd_from_geometry(
+            fluid=fluid,
+            p1_bar=p1_bar,
+            T_line=T_line,
+            D=D,
+            L=L,
+            r_over_D=r_over_D,
+        )
+        Cd = Cd_geom
+        Cd_source = f"estimated from geometry (r/D={r_over_D:.3f}, Re≈{Re_ref:.2e})"
+    else:
+        Cd = float(args.Cd)
+        Cd_source = "user-provided Cd"
+        Re_ref = None  # opzionale, non usato ma tenuto per completezza
 
     # ---- 1) Tabella input ----
     inputs = dict(
@@ -382,17 +440,20 @@ def main():
         D=D,
         L=L,
         Cd=Cd,
+        Cd_mode=Cd_mode,
+        Cd_source=Cd_source,
+        r_over_D=r_over_D,
     )
     print_inputs_table(inputs)
 
     # ---- 2) Portate SPI / HEM / NHNE + phase-aware ----
     mdot_spi = _mdot_spi(fluid, p1_bar, p2_bar, T_line, D, Cd,
-                         use_compress=use_spi_compress, n_isentropic=spi_n)
+                         use_compress=use_spi_comp, n_isentropic=spi_n)
     mdot_hem = _mdot_hem(fluid, p1_bar, p2_bar, T_line, D, Cd)
     mdot_nhne, _ = _mdot_nhne(fluid, p1_bar, p2_bar, T_line, D, Cd,
                               L_over_D=(L / D if D > 0.0 else None),
                               K_RESIDENCE=0.0,
-                              use_spi_compress=use_spi_compress,
+                              use_spi_compress=use_spi_comp,
                               spi_n=spi_n)
 
     mdot_pa, model_used = compute_mdot_phaseaware(
@@ -403,7 +464,7 @@ def main():
         D=D,
         Cd=Cd,
         L=L,
-        use_spi_compress=use_spi_compress,
+        use_spi_compress=use_spi_comp,
         spi_n=spi_n,
         K_RESIDENCE=0.0,
     )
@@ -414,7 +475,6 @@ def main():
     p1 = p1_bar * 1e5
     p2 = p2_bar * 1e5
 
-    # se hai già h1 dal core puoi passarlo, altrimenti lasciamo h1_hint=None
     out = nhne_out_state_from_mdot(
         fluid=fluid,
         p1=p1,
@@ -430,6 +490,7 @@ def main():
 
     # ---- 4) Tabella risultati principali della miscela ----
     print_main_results_table(mdot_pa, fluid, p2_bar, D, out)
+
 
 if __name__ == "__main__":
     main()

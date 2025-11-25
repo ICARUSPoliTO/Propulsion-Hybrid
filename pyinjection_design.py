@@ -1,20 +1,24 @@
 """
-PyInjection_design.py
+pyinjection_design.py
 ---------------------
 Design tool for plain-orifice N2O injectors.
 
 Questo script esplora una griglia 3D in:
-  - r/D  (edge radius ratio, raccordo d’ingresso)
+  - r/D  (edge radius ratio, raccordo d'ingresso)
   - D    (diametro orifizio)
   - L/D  (length-to-diameter ratio)
 
 Per ciascun punto:
-  - stima un Cd = f(r/D, L/D, Re)
+  - stima un Cd = f(r/D, L/D, Re) coerente con la ricerca svolta
+    (correlazione geometrica semplificata basata su letteratura e dataset
+     interni per orifizi corti N2O/CO2)
   - calcola la portata per foro usando il backend 0D phase-aware (SPI / NHNE)
     implementato in pyinjection_core / V5
   - ricostruisce lo stato a valle tramite HEM + bilancio energetico
   - valuta la portata totale per Nh fori e il relativo errore rispetto al target.
 """
+# Il modello di Cd(r/D, L/D, Re) è implementato in pyinjection_core.estimate_Cd_geom
+# e usato tramite estimate_Cd_from_geometry(...).
 
 from __future__ import annotations
 
@@ -27,18 +31,19 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import math
 import argparse
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
-import CoolProp.CoolProp as cp
 
 # ================== BACKEND 0D (V5 / CORE) ==================
 try:
     # Backend termodinamico + portate dalla versione V5
     from pyinjection_core import (
-        compute_mdot_phaseaware,
-        nhne_out_state_from_mdot,
+    compute_mdot_phaseaware,
+    nhne_out_state_from_mdot,
+    estimate_Cd_from_geometry,  # nuovo helper high-level dal core
     )
+
     HAS_PHASEAWARE = True
 
     def solve_mdot_phaseaware(
@@ -54,8 +59,7 @@ try:
         L_over_D: float | None = None,
     ):
         """
-        Wrapper compatibile con la vecchia API 'solve_mdot_phaseaware' (V4),
-        ma appoggiato al backend V5/pyinjection_core.
+        Wrapper verso il backend V5: calcola mdot phase-aware e stato in uscita.
 
         Parametri
         ---------
@@ -70,9 +74,9 @@ try:
         Cd : float
             Coefficiente di scarico [-].
         use_spi_compress : bool
-            Usa SPI compressibile (come in V5).
+            Usa SPI compressibile.
         spi_n : float | None
-            Esponente politropico per SPI compressibile; se None usa il default del backend V5.
+            Esponente politropico per SPI compressibile; se None usa il default del backend.
         L_over_D : float | None
             Rapporto L/D del foro. Se fornito, viene convertito in L = D * L_over_D.
 
@@ -83,10 +87,7 @@ try:
         model_used : str
             'SPI' oppure 'NHNE' (modello scelto dal phase-aware).
         info : dict
-            Dizionario con:
-            - 'phase_from_spi' : str  (fase di uscita in equilibrio: gas/liquid/two-phase)
-            - 'rho_out_spi'    : float (densità miscela a valle per il Re)
-            - altre grandezze di stato utili per debug/analisi.
+            Dizionario con info di uscita (fase, densità, Re, Mach, ecc.).
         """
         # Conversione pressioni Pa → bar per il backend V5
         p1_bar = p1 / 1e5
@@ -106,6 +107,7 @@ try:
             L=L,
             use_spi_compress=use_spi_compress,
             spi_n=spi_n,
+            K_RESIDENCE=0.0,
         )
 
         # 2) Stato di uscita coerente (equilibrio HEM + bilancio energia)
@@ -145,96 +147,6 @@ except ImportError as e:
         "Assicurati che pyinjection_core.py sia nello stesso folder o nel PYTHONPATH."
     ) from e
 
-# ================== COSTANTI & FALLBACK ==================
-MU_LIQ_FALLBACK: float = 3.0e-4  # Pa·s, fallback per N2O liquido ~280–320 K
-
-
-# ================== FUNZIONI DI SUPPORTO ==================
-def _safe_liq_props(fluid: str, p: float, T_line: float) -> tuple[float, float]:
-    """
-    Densità e viscosità liquide 'robuste' per il design (lato liquido vicino a sat).
-    """
-    # Densità liquida (preferibilmente a saturazione)
-    try:
-        rho_l = cp.PropsSI("D", "P", p, "Q", 0, fluid)
-    except Exception:
-        try:
-            rho_l = cp.PropsSI("D", "P", p, "T", T_line, fluid)
-        except Exception:
-            rho_l = 700.0  # fallback [kg/m^3]
-
-    rho_l = max(rho_l, 1.0)
-
-    # Viscosità liquida
-    try:
-        mu_l = cp.PropsSI("V", "P", p, "Q", 0, fluid)
-    except Exception:
-        mu_l = MU_LIQ_FALLBACK
-
-    mu_l = max(mu_l, 1e-6)
-
-    return rho_l, mu_l
-
-
-# ================== MODELLO Cd (r/D, L/D, Re) ==================
-def _cd_map_r_over_D() -> tuple[np.ndarray, np.ndarray]:
-    """Piccola mappa Cd(r/D) per raccordo d’ingresso."""
-    rD = np.array([0.00, 0.02, 0.05, 0.10, 0.20])
-    Cd = np.array([0.62, 0.70, 0.78, 0.84, 0.90])
-    return rD, Cd
-
-
-def _cd_map_L_over_D() -> tuple[np.ndarray, np.ndarray]:
-    """Piccola mappa Cd(L/D) per orifizi cilindrici."""
-    LD = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 8.0])
-    Cd = np.array([0.80, 0.85, 0.90, 0.93, 0.96, 0.98])
-    return LD, Cd
-
-
-def _cd_map_Re() -> tuple[np.ndarray, np.ndarray]:
-    """Piccola mappa Cd(Re) per orifizi pieni."""
-    Re_vals = np.array([5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5])
-    Cd_vals = np.array([0.70, 0.80, 0.88, 0.94, 0.97, 0.985, 0.995])
-    return Re_vals, Cd_vals
-
-
-def _blend_three_factors(cd_r: float, cd_ld: float, cd_re: float,
-                         w_r: float = 0.4,
-                         w_ld: float = 0.4,
-                         w_re: float = 0.2) -> float:
-    """Blend logaritmico dei tre contributi Cd."""
-    eps = 1e-6
-    cd_r  = max(cd_r,  eps)
-    cd_ld = max(cd_ld, eps)
-    cd_re = max(cd_re, eps)
-    ln_cd = (w_r * math.log(cd_r)
-             + w_ld * math.log(cd_ld)
-             + w_re * math.log(cd_re))
-    return float(math.exp(ln_cd))
-
-
-def estimate_Cd(r_over_D: float,
-                L_over_D: float,
-                Re: float) -> float:
-    """
-    Stima "smooth" di Cd(r/D, L/D, Re) usando piccole mappe 1D
-    e un blend logaritmico.
-    """
-    r_over_D = max(r_over_D, 0.0)
-    L_over_D = max(L_over_D, 0.1)
-    Re = max(Re, 1.0)
-
-    rD_grid, Cd_rD   = _cd_map_r_over_D()
-    LD_grid, Cd_LD   = _cd_map_L_over_D()
-    Re_grid, Cd_Re   = _cd_map_Re()
-
-    Cd_r  = float(np.interp(r_over_D, rD_grid, Cd_rD))
-    Cd_ld = float(np.interp(L_over_D, LD_grid, Cd_LD))
-    Cd_re = float(np.interp(Re, Re_grid, Cd_Re))
-
-    Cd_est = _blend_three_factors(Cd_r, Cd_ld, Cd_re)
-    return max(0.4, min(Cd_est, 1.0))
-
 
 # ================== EVALUAZIONE DI UN CANDIDATO ==================
 @dataclass
@@ -262,65 +174,74 @@ def evaluate_candidate(
     r_over_D: float,
     D: float,
     L: float,
+    Cd_fixed: Optional[float] = None,
 ) -> CandidateResult:
     """
     Valuta un candidato (r/D, D, L) per un certo numero di fori.
 
     Usa il backend phase-aware (SPI / NHNE) di V5 per calcolare la portata
     per foro e ricostruire le proprietà a valle (HEM).
+
+    Se Cd_fixed è fornito, bypassa la stima geometrica e usa quel valore
+    (tipicamente da CFD o esperimento). Altrimenti il Cd è stimato dal core
+    in base a geometria e Re caratteristico.
     """
     p1 = p1_bar * 1e5
     p2 = p2_bar * 1e5
+    L_over_D = L / D
 
-    # Proprietà liquide “di riferimento” lato monte (per Cd iniziale e Re guess)
-    rho_l, mu_l = _safe_liq_props(fluid, p1, T_line)
+    # --- Cd + proprietà di riferimento dal core ---
+    # (il core calcola rho_l, mu_l, Re_char e decide se usare Cd_input o Cd_geom)
+    Cd_used, Re_char, rho_l, mu_l = estimate_Cd_from_geometry(
+        fluid=fluid,
+        p1=p1,
+        T_line=T_line,
+        D=D,
+        L=L,
+        r_over_D=r_over_D,
+        Cd_input=Cd_fixed,   # None => stima geometrica, >0 => usa dato utente
+    )
 
-    # Area foro e Re di prova per stimare Cd
+    # Area foro (serve dopo per Re_eff a posteriori)
     A_hole = 0.25 * math.pi * D**2
-    U_char = 10.0  # velocità caratteristica fittizia per stimare Re
-    Re_guess = rho_l * U_char * D / max(mu_l, 1e-9)
-    Cd_guess = estimate_Cd(r_over_D, L / D, Re_guess)
 
-    # Portata phase-aware per foro
+    # --- Portata phase-aware per foro ---
     mdot_per_hole, model_used, info = solve_mdot_phaseaware(
         fluid=fluid,
         p1=p1,
         p2=p2,
         T_line=T_line,
         D=D,
-        Cd=Cd_guess,
+        Cd=Cd_used,
         use_spi_compress=True,
         spi_n=1.2,
-        L_over_D=(L / D),
+        L_over_D=L_over_D,
     )
 
     phase_out = info.get("phase_from_spi", "unknown")
-    rho_out = info.get("rho_out_spi", rho_l)  # densità miscela per Re
+    rho_out = info.get("rho_out_spi", rho_l)  # densità miscela per Re_eff
 
-    # Re fisicamente corretto: Re = rho * U * D / mu (uso mu_l come riferimento)
+    # --- Re effettivo basato sulla portata finale ---
     if mdot_per_hole > 0.0 and rho_out > 0.0:
         U_eff = mdot_per_hole / (rho_out * A_hole)
         Re_eff = rho_out * abs(U_eff) * D / max(mu_l, 1e-9)
     else:
         Re_eff = float("nan")
 
-    Cd_eff = Cd_guess  # se in futuro il backend restituisce Cd effettivo, si aggiorna qui
-
     return CandidateResult(
         D=D,
         L=L,
         r_over_D=r_over_D,
-        L_over_D=L / D,
+        L_over_D=L_over_D,
         Re=Re_eff,
-        Cd=Cd_eff,
+        Cd=Cd_used,
         mdot_total=mdot_per_hole * nholes,
         mdot_per_hole=mdot_per_hole,
         nh=nholes,
         rho_l=rho_l,
         mu_l=mu_l,
-        note=f"model={model_used}, phase_out={phase_out}",
+        note=f"model={model_used}, phase_out={phase_out}, Re_char={Re_char:.3e}",
     )
-
 
 def _eval_candidate_wrapper(args_tuple):
     """Wrapper per parallelizzazione (ThreadPoolExecutor.map)."""
@@ -345,10 +266,14 @@ def design_from_mdot(
     L_over_D_max: float,
     n_LD: int,
     n_workers: int = 1,
+    Cd_fixed: Optional[float] = None,
 ) -> List[CandidateResult]:
     """
     Scansiona una griglia 3D in (r/D, D, L/D) e calcola mdot_total per ciascun candidato.
     Parallelizza via ThreadPoolExecutor se n_workers > 1.
+
+    Se Cd_fixed è fornito, usa quel valore di Cd per tutti i candidati;
+    altrimenti usa la correlazione estimate_Cd(r/D,L/D,Re).
     """
     if not HAS_PHASEAWARE:
         raise RuntimeError(
@@ -379,6 +304,7 @@ def design_from_mdot(
                     float(r_over_D),
                     float(D),
                     float(L),
+                    Cd_fixed,
                 ))
 
     results: List[CandidateResult] = []
@@ -567,6 +493,29 @@ def print_candidate_table(cands: List[CandidateResult], mdot_target: float) -> N
     print("-" * 118)
 
 
+def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
+    """Stampa una piccola tabella riassuntiva per il miglior candidato globale."""
+    if mdot_target > 0.0:
+        err = abs(c.mdot_total - mdot_target) / mdot_target * 100.0
+    else:
+        err = float("nan")
+
+    print("\n=== Best candidate (global minimum error) ===")
+    print(f"D [mm]     : {c.D*1e3:.3f}")
+    print(f"L [mm]     : {c.L*1e3:.3f}")
+    print(f"L/D        : {c.L_over_D:.3f}")
+    print(f"r/D        : {c.r_over_D:.4f}")
+    print(f"Cd [-]     : {c.Cd:.4f}")
+    print(f"Nh [-]     : {c.nh:d}")
+    print(f"mdot_tot   : {c.mdot_total:.6f} kg/s")
+    print(f"err_rel    : {err:.3f} %")
+    print(f"Re         : {c.Re:.3e}")
+    print(f"rho_l@P1   : {c.rho_l:.3f} kg/m^3")
+    print(f"mu_l@P1    : {c.mu_l:.3e} Pa·s")
+    print(f"note       : {c.note}")
+    print("============================================\n")
+
+
 # ================== MAIN / CLI ==================
 def main():
     parser = argparse.ArgumentParser(
@@ -613,11 +562,11 @@ def main():
     parser.add_argument("--nLD", type=int, default=10,
                         help="Number of L/D samples. Default: 10")
 
-    parser.add_argument("--tol-rel-perc", type=float, default=2.0,
-                        help="Relative mass-flow error tolerance [%%] to mark 'good' points. Default: 2.0")
+    parser.add_argument("--tol-rel-perc", type=float, default=3.0,
+                        help="Relative mass-flow error tolerance [%%] for 'good' points. Default: 3.0")
 
     parser.add_argument("--topk", type=int, default=10,
-                        help="Number of best candidates to print. Default: 10")
+                        help="Number of candidates to print in the table. Default: 10")
 
     parser.add_argument("--csv-out", type=str, default=None,
                         help="Optional CSV file path for exporting full grid results.")
@@ -627,6 +576,9 @@ def main():
 
     parser.add_argument("--n-workers", type=int, default=24,
                         help="Number of worker threads for parallel evaluation (1 = serial).")
+
+    parser.add_argument("--Cd-fixed", type=float, default=None,
+                        help="If provided, use this fixed Cd (per hole) instead of geometric estimation.")
 
     args = parser.parse_args()
 
@@ -650,6 +602,7 @@ def main():
 
     tol_rel_perc = args.tol_rel_perc
     n_workers    = args.n_workers
+    Cd_fixed     = args.Cd_fixed
 
     print("=== Injector design setup ===")
     print(f"Fluid        : {fluid}")
@@ -662,6 +615,10 @@ def main():
     print(f"D range      : {args.Dmin_mm:.3f}–{args.Dmax_mm:.3f} mm  (nD = {nD})")
     print(f"L/D range    : {LD_min:.2f}–{LD_max:.2f}  (nLD = {nLD})")
     print(f"tol_rel      : {tol_rel_perc:.3f} %")
+    if Cd_fixed is not None:
+        print(f"Cd (fixed)   : {Cd_fixed:.4f}")
+    else:
+        print("Cd mode      : estimated from geometry (r/D, L/D, Re)")
     print(f"Workers      : {n_workers}")
     print("")
 
@@ -682,24 +639,34 @@ def main():
         L_over_D_max=LD_max,
         n_LD=nLD,
         n_workers=n_workers,
+        Cd_fixed=Cd_fixed,
     )
 
-    # Migliori candidati globali (per confronto)
-    best = select_best_candidates(results, mdot_target, topk=args.topk)
-    print("=== Best candidates in full 3D grid (sorted by |mdot - mdot_target|) ===")
-    print_candidate_table(best, mdot_target)
+    if not results:
+        print("Nessun risultato generato (lista vuota).")
+        return
+
+    # Migliori candidati globali
+    best_overall = select_best_candidates(results, mdot_target, topk=args.topk)
 
     # Punti che soddisfano il requisito sulla portata
     feasible = get_feasible_candidates(results, mdot_target, tol_rel_perc)
-    print(f"\n=== Candidates with |err_rel| <= {tol_rel_perc:.3f}% ===")
-    if not feasible:
-        print("(nessun punto soddisfa il requisito con questa tolleranza)")
-    else:
-        # stampo al massimo topk punti per non riempire il terminale
+
+    print("=== Selected design candidates ===")
+    if feasible:
+        # stampo i migliori topk fra quelli entro la tolleranza
         to_print = feasible[:args.topk]
         print_candidate_table(to_print, mdot_target)
         if len(feasible) > args.topk:
             print(f"... e altri {len(feasible) - args.topk} punti soddisfano il requisito.\n")
+    else:
+        # nessun punto entro la tolleranza: stampo i migliori globali
+        print("(nessun candidato soddisfa la tolleranza su mdot; stampo i migliori globali)\n")
+        print_candidate_table(best_overall, mdot_target)
+
+    # Tabellina riassuntiva per il miglior candidato globale
+    best_cand = best_overall[0]
+    print_best_candidate(best_cand, mdot_target)
 
     # Export CSV opzionale
     if args.csv_out is not None:

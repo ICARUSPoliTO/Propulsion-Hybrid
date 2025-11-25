@@ -14,6 +14,7 @@ Core backend per l'iniettore plain-orifice N2O:
 """
 
 import math
+import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
 import CoolProp.CoolProp as cp
@@ -662,3 +663,124 @@ def nhne_out_state_from_mdot(fluid: str,
                    if is_two
                    else ("gas" if T_out > T_sat_p2 + 0.5 else "liquid")),
     )
+
+# =============================================================================
+# Discharge coefficient model for short-orifice injectors
+# =============================================================================
+#
+# Fonti sperimentali principali usate per calibrare Cd(r/D, L/D, Re):
+#
+# [1] Reader–Harris, M.J., Gallagher, P.M. (1998).
+#     "The Orifice Plate Discharge Coefficient Equation".
+#     Base ISO 5167 per Cd(Re, β) in orifizi a spigolo vivo.
+#
+# [2] Gelalles, A.G., Marsh, E.T. (1931).
+#     "Effect of Orifice Length-Diameter Ratio on the Coefficient of Discharge".
+#     Dati storici su L/D in orifizi corti cilindrici.
+#
+# [3] Edlebeck, S. (2013).
+#     "Measurements of the Flow of Supercritical CO₂ Through Short Orifices".
+#     Effetti di L/D elevati e regime trans-/supercritico.
+#
+# [4] Waxman, J., Dyer, J., Karabeyoglu, A. (2019, Stanford).
+#     Misure di Cd per iniettori a orifizio singolo per N₂O,
+#     con varianti a spigolo vivo / smussato / raccordato.
+#
+# [5] Dataset interno fornito dall'utente:
+#     "Coefficiente di Scarico (Cd) in Orifizi Corti per N₂O (e Fluidi Simili) – Dataset e Correlazioni.pdf".
+#     → Usato per allineare i range numerici alle condizioni tipiche N₂O
+#       nel campo 10⁴ ≲ Re ≲ 10⁵ e 0.5 ≲ L/D ≲ 10.
+#
+# Il modello sottostante non è una correlazione diretta di un singolo paper,
+# ma una sintesi semplificata e regolarizzata delle tendenze sperimentali.
+# Serve come stima di primo livello coerente con la letteratura.
+# =============================================================================
+
+def estimate_Cd_geom(r_over_D: float,
+                     L_over_D: float,
+                     Re: float) -> float:
+    """Correlazione geometrica sintetica Cd(r/D, L/D, Re)."""
+    r_over_D = max(r_over_D, 0.0)
+    L_over_D = max(L_over_D, 0.1)
+    Re       = max(Re, 1.0)
+
+    # Cd base per spigolo vivo (funzione di Re)
+    Re_grid   = np.array([5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5])
+    Cd_sharp  = np.array([0.58, 0.60, 0.62, 0.63, 0.63, 0.63, 0.63])
+    Cd_base   = float(np.interp(Re, Re_grid, Cd_sharp))
+
+    # Fattore correttivo r/D
+    rD_grid = np.array([0.00, 0.05, 0.10, 0.20, 0.30])
+    f_rD    = np.array([1.00, 0.95, 1.10, 1.20, 1.25])
+    f_r     = float(np.interp(r_over_D, rD_grid, f_rD))
+
+    # Fattore correttivo L/D
+    LD_grid = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0])
+    f_LD    = np.array([0.96, 0.98, 1.00, 1.00, 0.97, 0.94, 0.90])
+    f_ld    = float(np.interp(L_over_D, LD_grid, f_LD))
+
+    Cd_est = Cd_base * f_r * f_ld
+    return max(0.55, min(Cd_est, 0.90))
+
+
+def estimate_Cd_from_geometry(
+    fluid: str,
+    p1: float,
+    T_line: float,
+    D: float,
+    L: float,
+    r_over_D: float,
+    *,
+    Cd_input: float | None = None,
+    Re_char: float | None = None,
+) -> tuple[float, float, float, float]:
+    """
+    Helper high-level per ricavare Cd a partire dalla geometria dell'orifizio,
+    con opzionale override da dati CFD/esperimento.
+
+    Parametri
+    ---------
+    fluid : str
+        Nome CoolProp del fluido.
+    p1 : float
+        Pressione a monte [Pa].
+    T_line : float
+        Temperatura linea a monte [K].
+    D, L : float
+        Diametro e lunghezza orifizio [m].
+    r_over_D : float
+        Edge radius ratio (raccordo d'ingresso).
+    Cd_input : float | None
+        Se >0, questo valore viene usato direttamente (es. da CFD/esperimenti).
+        Se None o <=0, si usa la correlazione geometrica estimate_Cd_geom.
+    Re_char : float | None
+        Reynolds caratteristico. Se None, viene stimato a partire da
+        rho_l, mu_l e una velocità caratteristica fittizia.
+
+    Ritorna
+    -------
+    Cd_used : float
+        Cd effettivamente usato.
+    Re_char : float
+        Reynolds caratteristico utilizzato nella correlazione.
+    rho_l : float
+        Densità liquida di riferimento a monte [kg/m^3].
+    mu_l : float
+        Viscosità liquida di riferimento a monte [Pa*s].
+    """
+    # Proprietà monofase liquide di riferimento
+    rho_l = rho_singlephase_at_T(fluid, p1, T_line, side="liq")
+    mu_l  = _safe_viscosity(fluid, p1, T_line, phase="liq")
+
+    if Re_char is None:
+        # Velocità caratteristica fittizia (ordine di grandezza)
+        U_char = 10.0
+        Re_char = rho_l * U_char * D / max(mu_l, 1e-9)
+
+    if Cd_input is not None and Cd_input > 0.0:
+        Cd_used = float(Cd_input)
+    else:
+        L_over_D = L / D
+        Cd_used  = estimate_Cd_geom(r_over_D, L_over_D, Re_char)
+
+    return Cd_used, Re_char, rho_l, mu_l

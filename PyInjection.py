@@ -61,15 +61,15 @@ if __name__ == '__main__':
     ox = Injector('NitrousOxide')
 
     ox.injection_area(0.0127,1)
-    pinj= np.arange(70,71,1) #[bar]
+    pinj= np.arange(50,70,1) #[bar]
 
-    pc = 1 #[bar]
+    pc = 43 #[bar]
     mdot= np.zeros(np.shape(pinj))
     mdot_SPI= np.zeros(np.shape(pinj))
     mdot_HEM= np.zeros(np.shape(pinj))
 
     for i in range(np.shape(pinj)[0]):
-        ox.massflow( pinj[i]*10**5, pc*10**5, 308, 1)
+        ox.massflow( pinj[i]*10**5, pc*10**5, 293, 1)
         mdot[i] = ox.mdot * ox.A
 
     mfuel = 0.116*(mdot/(0.25*np.pi*(13.4E-3)**2))**0.331
@@ -77,11 +77,11 @@ if __name__ == '__main__':
     print(pinj)
     print(mdot)
 
-    #plt.plot(pinj,mdot, label='Dyer')
+    plt.plot(pinj,mdot, label='Dyer')
 
-    #plt.xlabel('Injection pressure [bar]')
-    #plt.ylabel('Mass flow [kg/s]')
-    #plt.legend()
-    #plt.show()
+    plt.xlabel('Injection pressure [bar]')
+    plt.ylabel('Mass flow [kg/s]')
+    plt.legend()
+    plt.show()
 
 # end of file
