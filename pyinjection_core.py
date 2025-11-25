@@ -9,10 +9,8 @@ Core backend per l'iniettore plain-orifice N2O:
     * HEM
     * NHNE = blend SPI/HEM
 - Selettore phase-aware (SPI vs NHNE)
-- Stato in uscita coherente con mdot (HEM + bilancio entalpia di ristagno)
+- Stato in uscita coerente con mdot (HEM + bilancio entalpia di ristagno)
 - Helper per proprietà termodinamiche robusti (vicino a saturazione)
-
-Questo modulo NON ha main, NON stampa nulla, NON importa PyInjection_0D_V5.
 """
 
 import math
@@ -86,7 +84,7 @@ def _safe_tsat_at_p(fluid: str, p: float) -> Optional[float]:
 def _rho_single_at_T(fluid: str, p: float, T: float, side: str) -> float:
     """
     Densità monofase robusta vicino a saturazione.
-    Se |p - Psat(T)|/Psat(T) < EPS_REL_PSAT → sposta p lato 'side'.
+    Se |p - Psat(T)|/Psat(T) < EPS_REL_PSAT -> sposta p lato 'side'.
     """
     try:
         p_sat = _safe_psat_at_T(fluid, T)
@@ -323,7 +321,7 @@ def compute_mdot_phaseaware(fluid: str,
                             K_RESIDENCE: float = 0.0) -> Tuple[float, str]:
     """
     Ritorna (mdot_phaseaware, model_used), con scelta automatica:
-      - se con mdot_SPI l'uscita è bifase → usa NHNE
+      - se con mdot_SPI l'uscita è bifase -> usa NHNE
       - altrimenti usa SPI
     """
     p1, p2 = _pkey(p1_bar * 1e5), _pkey(p2_bar * 1e5)
@@ -354,8 +352,8 @@ def _safe_viscosity(fluid: str, p: float, T: Optional[float] = None,
                     phase: str = "gas", x: Optional[float] = None) -> float:
     """
     Viscosità robusta:
-      - phase = 'gas' / 'liq' → singola fase
-      - altri valori → blend due-fasi (HEM) in base a x
+      - phase = 'gas' / 'liq' -> singola fase
+      - altri valori -> blend due-fasi (HEM) in base a x
     """
     try:
         if phase == "gas":
@@ -393,7 +391,7 @@ def _safe_speed_of_sound(fluid: str,
                          rho_v: Optional[float] = None) -> float:
     """
     Velocità del suono robusta:
-      - per ora: se two_phase → usa lato gas a T_sat(P) (o T_out)
+      - per ora: se two_phase -> usa lato gas a T_sat(P) (o T_out)
       - altrimenti: a(P,T) monofase
     """
     try:
@@ -469,7 +467,7 @@ def estimate_T_out_energy(fluid: str,
     Stima T_out da bilancio di entalpia di ristagno:
       h2 = h1 + U_in^2/2 - U_out^2/2
 
-    Ritorna (T_out, h2, phase_hint) dove phase_hint ∈ {'gas', 'liq', 'two_phase'}.
+    Ritorna (T_out, h2, phase_hint) dove phase_hint appartiene a {'gas', 'liq', 'two_phase'}.
     """
     # h1 a monte
     try:
