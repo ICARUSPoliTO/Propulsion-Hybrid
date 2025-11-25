@@ -1,13 +1,13 @@
 """
-PyInjection_0D_V5.py
+pyinjection_performance.py
 --------------------
 
 Single-case plain-orifice N2O injector:
 - usa il backend fisico/termodinamico in pyinjection_core.py
 - stampa tabelle di input, portate e proprietà in uscita.
 
-Questo file NON contiene più la fisica dei modelli; è solo un wrapper
-per la CLI e la formattazione dell'output.
+Questo file non contiene più la fisica dei modelli; è solo un wrapper
+per la formattazione dell'output.
 """
 
 import math
@@ -82,7 +82,7 @@ def print_inputs_table(params: Dict[str, Any]) -> None:
         {"k": "A (da D) [m^2]",   "v": f'{A:.8e}'},
         {"k": "Cd [-]",           "v": f'{params["Cd"]:.4f}'},
     ]
-    _print_table("TABELLA INPUT – Parametri del caso", cols, rows)
+    _print_table("TABELLA INPUT - Parametri del caso", cols, rows)
 
 
 # ============================================================
@@ -109,7 +109,7 @@ def print_mdot_table(mdot_spi: float,
 
 
 # ============================================================
-#  TABELLA PROPRIETÀ DI FASE IN USCITA
+#  TABELLA PROPRIETÀ DI FASE IN USCITA 
 # ============================================================
 
 def print_phase_properties_table(fluid: str,
@@ -118,8 +118,14 @@ def print_phase_properties_table(fluid: str,
                                  out: Dict[str, Any]) -> None:
     """
     Proprietà in uscita delle singole fasi:
-    - se bifase: liquido + vapore (stessa T_out, T_sat, ma j_liq/j_gas, ρ, μ, Re)
+    - se bifase: liquido + vapore (stessa T_out, T_sat, ma j_liq/j_gas, rho, mu, Re)
     - se monofase: unica riga per la fase presente.
+    Include:
+      - alpha (volume fraction)
+      - Cp [J/kg/K]
+      - k  [W/m/K]
+      - MW [kg/kmol]
+      - h  [J/kg]
     """
     p2 = p2_bar * 1e5
     try:
@@ -131,15 +137,29 @@ def print_phase_properties_table(fluid: str,
     T_out = out["T_out"]
 
     cols = [
-        ("Fase",        "phase",    12, "s"),
-        ("T [K]",       "T",        12, ".3f"),
-        ("T_sat(P2)",   "Tsat",     12, ".3f"),
-        ("U [m/s]",     "U",        12, ".3f"),
-        ("rho [kg/m3]", "rho",      14, ".3f"),
-        ("mu [Pa·s]",   "mu",       14, ".3e"),
-        ("Re [-]",      "Re",       14, ".3e"),
+        ("Fase",         "phase",   10, "s"),
+        ("T [K]",        "T",        8, ".3f"),
+        ("T_sat(P2)",    "Tsat",    10, ".3f"),
+        ("U [m/s]",      "U",       10, ".3f"),
+        ("rho [kg/m3]",  "rho",     12, ".3f"),
+        ("mu [Pa·s]",    "mu",      12, ".3e"),
+        ("Re [-]",       "Re",      12, ".3e"),
+        ("alpha [-]",    "alpha",    8, ".3f"),
+        ("Cp [J/kg/K]",  "cp",      12, ".3e"),
+        ("k [W/m/K]",    "k",       12, ".3e"),
+        ("MW [kg/kmol]", "MW",      12, ".3f"),
+        ("h [J/kg]",     "h",       14, ".3e"),
     ]
     rows: List[Dict[str, Any]] = []
+
+    # volume fraction complessiva della fase vapore
+    alpha_mix = float(out.get("alpha_out", 0.0))
+
+    # MW è lo stesso per entrambe le fasi
+    try:
+        MW_val = cp.PropsSI("M", fluid) * 1000.0  # kg/kmol
+    except Exception:
+        MW_val = float("nan")
 
     if phase == "two-phase":
         rho_l = out["rho_l"]
@@ -153,39 +173,98 @@ def print_phase_properties_table(fluid: str,
         Re_l  = rho_l * j_l * D / max(mu_l, 1e-12) if rho_l is not None else 0.0
         Re_v  = rho_v * j_v * D / max(mu_v, 1e-12) if rho_v is not None else 0.0
 
+        # Proprietà termiche alle condizioni sature lato liquido / vapore
+        try:
+            cp_l = cp.PropsSI("C", "P", p2, "Q", 0, fluid)
+        except Exception:
+            cp_l = float("nan")
+        try:
+            cp_v = cp.PropsSI("C", "P", p2, "Q", 1, fluid)
+        except Exception:
+            cp_v = float("nan")
+
+        try:
+            k_l = cp.PropsSI("L", "P", p2, "Q", 0, fluid)
+        except Exception:
+            k_l = float("nan")
+        try:
+            k_v = cp.PropsSI("L", "P", p2, "Q", 1, fluid)
+        except Exception:
+            k_v = float("nan")
+
+        try:
+            h_l = cp.PropsSI("H", "P", p2, "Q", 0, fluid)
+        except Exception:
+            h_l = float("nan")
+        try:
+            h_v = cp.PropsSI("H", "P", p2, "Q", 1, fluid)
+        except Exception:
+            h_v = float("nan")
+
+        # Frazione volumetrica liquido = 1 - alpha_mix
         rows.append(dict(
             phase="liquido",
             T=T_out, Tsat=T_sat,
             U=j_l, rho=rho_l, mu=mu_l, Re=Re_l,
+            alpha=(1.0 - alpha_mix),
+            cp=cp_l, k=k_l, MW=MW_val, h=h_l,
         ))
+        # Frazione volumetrica vapore = alpha_mix
         rows.append(dict(
             phase="vapore",
             T=T_out, Tsat=T_sat,
             U=j_v, rho=rho_v, mu=mu_v, Re=Re_v,
+            alpha=alpha_mix,
+            cp=cp_v, k=k_v, MW=MW_val, h=h_v,
         ))
 
     else:
-        # singola fase
+        # monofase: calcolo proprietà alla condizione (P2, T_out)
         if phase == "gas":
-            rho = out["rho_v"] if out["rho_v"] is not None else rho_singlephase_at_T(fluid, p2, T_out, side="gas")
-            mu  = _safe_viscosity(fluid, p2, T_out, phase="gas")
+            rho = out["rho_v"] if out["rho_v"] is not None else rho_singlephase_at_T(
+                fluid, p2, T_out, side="gas"
+            )
+            mu   = _safe_viscosity(fluid, p2, T_out, phase="gas")
             name = "gas"
+            alpha_single = 1.0
         else:
-            rho = out["rho_l"] if out["rho_l"] is not None else rho_singlephase_at_T(fluid, p2, T_out, side="liq")
-            mu  = _safe_viscosity(fluid, p2, T_out, phase="liq")
+            rho = out["rho_l"] if out["rho_l"] is not None else rho_singlephase_at_T(
+                fluid, p2, T_out, side="liq"
+            )
+            mu   = _safe_viscosity(fluid, p2, T_out, phase="liq")
             name = "liquido"
+            alpha_single = 0.0
 
-        U = out["U_out"]
+        U  = out["U_out"]
         Re = rho * U * D / max(mu, 1e-12)
+
+        try:
+            cp_phase = cp.PropsSI("C", "P", p2, "T", T_out, fluid)
+        except Exception:
+            cp_phase = float("nan")
+
+        try:
+            k_phase = cp.PropsSI("L", "P", p2, "T", T_out, fluid)
+        except Exception:
+            k_phase = float("nan")
+
+        try:
+            h_phase = cp.PropsSI("H", "P", p2, "T", T_out, fluid)
+        except Exception:
+            h_phase = float("nan")
 
         rows.append(dict(
             phase=name,
             T=T_out, Tsat=T_sat,
             U=U, rho=rho, mu=mu, Re=Re,
+            alpha=alpha_single,
+            cp=cp_phase, k=k_phase, MW=MW_val, h=h_phase,
         ))
 
-    _print_table("PROPRIETÀ DI USCITA – Fasi (T, Tsat, U, rho, mu, Re)", cols, rows)
-
+    _print_table(
+        "PROPRIETÀ DI USCITA - Fasi (T, Tsat, U, rho, mu, Re, alpha, Cp, k, MW, h)",
+        cols, rows
+    )
 
 # ============================================================
 #  TABELLA RISULTATI PRINCIPALI MISCELA
@@ -201,7 +280,8 @@ def print_main_results_table(mdot_pa: float,
     - mdot phase-aware
     - fase di uscita (liquid/gas/two-phase)
     - T_out, T_sat(P2)
-    - U_mix, rho_mix, mu_mix, Re_mix, Mach.
+    - U_mix, rho_mix, mu_mix, Re_mix, Mach
+    - sigma (tensione superficiale) valutata a T_sat(P2), Q=0 se bifase.
     """
     p2 = p2_bar * 1e5
     try:
@@ -209,33 +289,53 @@ def print_main_results_table(mdot_pa: float,
     except Exception:
         T_sat = out["T_out"]
 
-    cols = [
-        ("mdot_PA [kg/s]",   "mdot",      16, ".6f"),
-        ("fase uscita",      "phase",     14, "s"),
-        ("T_out [K]",        "T",         12, ".3f"),
-        ("T_sat(P2) [K]",    "Tsat",      13, ".3f"),
-        ("U_mix [m/s]",      "U",         12, ".3f"),
-        ("rho_mix [kg/m3]",  "rho",       16, ".3f"),
-        ("mu_mix [Pa·s]",    "mu",        16, ".3e"),
-        ("Re_mix [-]",       "Re",        16, ".3e"),
-        ("Mach [-]",         "Mach",      12, ".3f"),
-    ]
-    rows = [dict(
-        mdot = mdot_pa,
-        phase= out["phase_out"],
-        T    = out["T_out"],
-        Tsat = T_sat,
-        U    = out["U_out"],
-        rho  = out["rho_mix"],
-        mu   = out["mu_mix"],
-        Re   = out["Re_out"],
-        Mach = out["Mach"],
-    )]
-    _print_table("RISULTATI PRINCIPALI – Portata phase-aware e proprietà miscela", cols, rows)
+    phase_out = out["phase_out"]
 
+    # Tensione superficiale:
+    # - ha senso solo se l'uscita è bifase (interfaccia liquido–vapore)
+    # - usiamo I(T_sat, Q=0) [N/m]; in monofase restituiamo 0.0
+    if phase_out == "two-phase":
+        try:
+            sigma = cp.PropsSI("I", "T", T_sat, "Q", 0, fluid)
+        except Exception:
+            sigma = float("nan")
+    else:
+        sigma = 0.0
+
+    # intestazioni corte + larghezze ridotte → tabella più compatta
+    cols = [
+        ("mdot [kg/s]",  "mdot",  12, ".6f"),
+        ("fase",         "phase", 10, "s"),
+        ("T [K]",        "T",      8, ".3f"),
+        ("Tsat [K]",     "Tsat",   9, ".3f"),
+        ("U [m/s]",      "U",      9, ".3f"),
+        ("rho [kg/m3]",  "rho",   12, ".3f"),
+        ("mu [Pa·s]",    "mu",    12, ".3e"),
+        ("Re [-]",       "Re",    12, ".3e"),
+        ("Mach [-]",     "Mach",   9, ".3f"),
+        ("sigma [N/m]",  "sigma", 12, ".3e"),
+    ]
+
+    rows = [dict(
+        mdot  = mdot_pa,
+        phase = phase_out,
+        T     = out["T_out"],
+        Tsat  = T_sat,
+        U     = out["U_out"],
+        rho   = out["rho_mix"],
+        mu    = out["mu_mix"],
+        Re    = out["Re_out"],
+        Mach  = out["Mach"],
+        sigma = sigma,
+    )]
+
+    _print_table(
+        "RISULTATI PRINCIPALI - Portata phase-aware e proprietà miscela",
+        cols, rows
+    )
 
 # ============================================================
-#  MAIN (CLI SINGLE CASE)
+#  MAIN
 # ============================================================
 
 def main():
@@ -330,7 +430,6 @@ def main():
 
     # ---- 4) Tabella risultati principali della miscela ----
     print_main_results_table(mdot_pa, fluid, p2_bar, D, out)
-
 
 if __name__ == "__main__":
     main()
