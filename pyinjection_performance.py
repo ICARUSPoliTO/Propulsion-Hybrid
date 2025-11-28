@@ -384,8 +384,8 @@ def main():
                         help="Orifice diameter [m] (default: 2.0e-3)")
     parser.add_argument("--L", type=float, default=10.0e-3,
                         help="Orifice length [m] (default: 10.0e-3)")
-    parser.add_argument("--Cd", type=float, default=0.9875,
-                        help="Discharge coefficient [-] (default: 0.9875)")
+    parser.add_argument("--Cd", type=float, default=1,
+                        help="Discharge coefficient [-] (default: 1)")
     parser.add_argument("--Cd-mode", type=str, default="user",
                         choices=["user", "geom"],
                         help="Modo di determinazione del Cd: "

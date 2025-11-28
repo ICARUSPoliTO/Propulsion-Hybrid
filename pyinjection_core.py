@@ -664,6 +664,136 @@ def nhne_out_state_from_mdot(fluid: str,
                    else ("gas" if T_out > T_sat_p2 + 0.5 else "liquid")),
     )
 
+def _Re_from_mdot_target(
+    mdot_target: float,
+    D_orif: float,
+    mu_out: float,
+) -> float:
+    """
+    Reynolds all'orifizio usando la portata target:
+
+        Re = 4 * mdot / (π * μ * D)
+
+    dove mdot è la portata target e μ è la viscosità allo stato in uscita
+    (liquido o quasi-liquido, come usi nel core).
+    """
+    D_orif = max(D_orif, 1e-9)
+    mu_out = max(mu_out, 1e-9)
+    return float(4.0 * mdot_target / (math.pi * mu_out * D_orif))
+
+def _gain_r_over_D(
+    r_over_D: float,
+    *,
+    gain_max: float = 0.25,
+    r_sat: float = 0.08,
+) -> float:
+    """
+    Guadagno sul Cd dovuto al raccordo r/D, con saturazione asintotica.
+
+    G_r = 1                              per r/D = 0  (spigolo vivo)
+    G_r → 1 + gain_max ≈ 1.25            per r/D >> r_sat
+
+    Con gain_max=0.25 e r_sat=0.08:
+      r/D ~ 0.20–0.25 → G_r ~ 1.23–1.24 (≈ +23–24%).
+    """
+    r_over_D = max(r_over_D, 0.0)
+    gain_max = max(0.0, gain_max)
+
+    G = 1.0 + gain_max * (1.0 - math.exp(-r_over_D / max(r_sat, 1e-6)))
+    return float(G)
+
+def _friction_factor_moody(
+    Re: float,
+    D_hyd: float,
+    eps_abs: float,
+) -> float:
+    """
+    Fattore di attrito Darcy f(Re, ε/D) stile Moody.
+
+    - Laminar: f = 64 / Re
+    - Turbolento: Swamee–Jain (buon fit alla Colebrook–White).
+    """
+    Re = max(Re, 1.0)
+    D_hyd = max(D_hyd, 1e-9)
+    rel_rough = max(eps_abs / D_hyd, 1e-7)
+
+    # Flusso laminare
+    if Re < 2300.0:
+        return 64.0 / Re
+
+    # Swamee–Jain per turbolento in tubo rugoso
+    A = rel_rough / 3.7 + 5.74 / (Re ** 0.9)
+    f = 0.25 / (math.log10(A) ** 2)
+    return float(f)
+
+def _K_darcy(
+    Re_orifice: float,
+    D_orif: float,
+    L: float,
+    eps_abs: float,
+) -> float:
+    """
+    Coefficiente di perdita Darcy for the cylindrical part of the orifice:
+
+        K_D = f(Re, ε/D) * (L / D)
+    """
+    D_orif = max(D_orif, 1e-9)
+    L_over_D = max(L / D_orif, 0.0)
+
+    f_D = _friction_factor_moody(Re_orifice, D_orif, eps_abs)
+    return float(f_D * L_over_D)
+
+def _Cd_reader_harris_gallagher(
+    beta: float,
+    Re_D: float,
+    D_pipe: float,
+    tap_type: str = "corner",
+) -> float:
+    """
+    Cd per orifice plate a spigolo vivo (Reader–Harris/Gallagher, ISO 5167).
+
+    beta    : rapporto di diametro d/D (orifizio / tubo).
+    Re_D    : Reynolds basato su D (tubo).
+    D_pipe  : diametro del tubo a monte [m].
+    tap_type: 'corner', 'flange' oppure 'D_D2'.
+    """
+    beta   = float(np.clip(beta, 0.1, 0.75))
+    Re_D   = float(np.clip(Re_D, 4e3, 1e7))
+    D_pipe = float(max(D_pipe, 1e-6))
+
+    # Geometria dei tappings
+    if tap_type == "corner":
+        L1  = 0.0
+        L2p = 0.0
+    elif tap_type == "flange":
+        L1  = 0.0254 / D_pipe
+        L2p = L1
+    elif tap_type == "D_D2":
+        L1  = 1.0
+        L2p = 0.47
+    else:
+        raise ValueError(f"Unknown tap_type: {tap_type}")
+
+    A   = (19000.0 * beta / Re_D) ** 0.8
+    M2p = 2.0 * L2p / (1.0 - beta)
+
+    term1 = 0.5961
+    term2 = 0.0261 * beta**2
+    term3 = -0.216 * beta**8
+    term4 = 0.000521 * (1.0e6 * beta / Re_D) ** 0.7
+    term5 = (0.0188 + 0.0063 * A) * beta**3.5 * (1.0e6 / Re_D) ** 0.3
+    term6 = (0.043 + 0.080 * math.exp(-10.0 * L1) - 0.123 * math.exp(-7.0 * L1))
+    term6 *= (1.0 - 0.11 * A) * beta**4 / (1.0 - beta**4)
+    term7 = -0.031 * (M2p - 0.8 * M2p**1.1) * beta**1.3
+
+    C = term1 + term2 + term3 + term4 + term5 + term6 + term7
+
+    # Correzione per D_pipe < 71.2 mm
+    if D_pipe < 0.0712:
+        C += 0.011 * (0.75 - beta) * (2.8 - D_pipe / 0.0254)
+
+    return float(np.clip(C, 0.3, 0.99))
+
 # =============================================================================
 # Discharge coefficient model for short-orifice injectors
 # =============================================================================
@@ -696,91 +826,106 @@ def nhne_out_state_from_mdot(fluid: str,
 # Serve come stima di primo livello coerente con la letteratura.
 # =============================================================================
 
-def estimate_Cd_geom(r_over_D: float,
-                     L_over_D: float,
-                     Re: float) -> float:
-    """Correlazione geometrica sintetica Cd(r/D, L/D, Re)."""
-    r_over_D = max(r_over_D, 0.0)
-    L_over_D = max(L_over_D, 0.1)
-    Re       = max(Re, 1.0)
+def estimate_Cd_geom_full(
+    D_orif: float,
+    L: float,
+    r_over_D: float,
+    beta: float,
+    mdot_target: float,
+    rho_out: float,
+    mu_out: float,
+    D_pipe: float,
+    eps_abs: float,
+    *,
+    tap_type: str = "corner",
+) -> tuple[float, float]:
+    """
+    Stima semi-empirica completa del Cd:
 
-    # Cd base per spigolo vivo (funzione di Re)
-    Re_grid   = np.array([5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5])
-    Cd_sharp  = np.array([0.58, 0.60, 0.62, 0.63, 0.63, 0.63, 0.63])
-    Cd_base   = float(np.interp(Re, Re_grid, Cd_sharp))
+      1) Cd_RHG(β, Re_D=β Re_or) per piastra a spigolo vivo.
+      2) Applicazione del guadagno G_r(r/D) sul Cd (ingresso raccordato).
+      3) Conversione a K_shape = 1/Cd^2 - 1 (perdite concentrate).
+      4) Aggiunta di K_Darcy = f(Re_or, ε/D) * (L/D).
+      5) Cd_finale = 1 / sqrt(1 + K_tot).
 
-    # Fattore correttivo r/D
-    rD_grid = np.array([0.00, 0.05, 0.10, 0.20, 0.30])
-    f_rD    = np.array([1.00, 0.95, 1.10, 1.20, 1.25])
-    f_r     = float(np.interp(r_over_D, rD_grid, f_rD))
+    Parametri principali:
+      - D_orif, L, r_over_D: geometria del foro
+      - beta = D_orif / D_pipe
+      - mdot_target: portata richiesta
+      - rho_out, mu_out: proprietà allo stato in uscita
+      - D_pipe: diametro del condotto a monte
+      - eps_abs: rugosità assoluta del foro
+    """
+    D_orif = max(D_orif, 1e-9)
+    L      = max(L,      0.0)
+    mu_out = max(mu_out, 1e-9)
 
-    # Fattore correttivo L/D
-    LD_grid = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0])
-    f_LD    = np.array([0.96, 0.98, 1.00, 1.00, 0.97, 0.94, 0.90])
-    f_ld    = float(np.interp(L_over_D, LD_grid, f_LD))
+    # 1) Reynolds all'orifizio usando la portata target
+    Re_or = _Re_from_mdot_target(mdot_target, D_orif, mu_out)
 
-    Cd_est = Cd_base * f_r * f_ld
-    return max(0.55, min(Cd_est, 0.90))
+    # Re basato su D_pipe per RHG (Re_D = β * Re_or)
+    Re_D = beta * Re_or
 
+    # 2) Cd di base (spigolo vivo, piastra sottile)
+    Cd_plate = _Cd_reader_harris_gallagher(beta, Re_D, D_pipe, tap_type=tap_type)
+
+    # 3) Guadagno per raccordo r/D sul Cd di plate
+    G_r    = _gain_r_over_D(r_over_D)
+    Cd_eq  = Cd_plate * G_r    # Cd "equivalente" di forma, senza attrito lungo L
+
+    # 4) Perdite equivalenti di forma (con raccordo)
+    K_shape = 1.0 / (Cd_eq ** 2) - 1.0
+
+    # 5) Perdite Darcy lungo il foro
+    K_d = _K_darcy(Re_or, D_orif, L, eps_abs)
+
+    # 6) K totale e Cd finale
+    K_tot = K_shape + K_d
+    Cd_final = 1.0 / math.sqrt(1.0 + K_tot)
+
+    # clamp di sicurezza
+    Cd_final = float(np.clip(Cd_final, 0.3, 0.95))
+
+    return Cd_final, Re_or
 
 def estimate_Cd_from_geometry(
     fluid: str,
     p1: float,
     T_line: float,
-    D: float,
+    D_orif: float,
     L: float,
     r_over_D: float,
+    D_pipe: float,
+    mdot_target: float,
     *,
     Cd_input: float | None = None,
-    Re_char: float | None = None,
+    eps_abs: float = 2e-6,
 ) -> tuple[float, float, float, float]:
     """
-    Helper high-level per ricavare Cd a partire dalla geometria dell'orifizio,
-    con opzionale override da dati CFD/esperimento.
-
-    Parametri
-    ---------
-    fluid : str
-        Nome CoolProp del fluido.
-    p1 : float
-        Pressione a monte [Pa].
-    T_line : float
-        Temperatura linea a monte [K].
-    D, L : float
-        Diametro e lunghezza orifizio [m].
-    r_over_D : float
-        Edge radius ratio (raccordo d'ingresso).
-    Cd_input : float | None
-        Se >0, questo valore viene usato direttamente (es. da CFD/esperimenti).
-        Se None o <=0, si usa la correlazione geometrica estimate_Cd_geom.
-    Re_char : float | None
-        Reynolds caratteristico. Se None, viene stimato a partire da
-        rho_l, mu_l e una velocità caratteristica fittizia.
-
-    Ritorna
-    -------
-    Cd_used : float
-        Cd effettivamente usato.
-    Re_char : float
-        Reynolds caratteristico utilizzato nella correlazione.
-    rho_l : float
-        Densità liquida di riferimento a monte [kg/m^3].
-    mu_l : float
-        Viscosità liquida di riferimento a monte [Pa*s].
+    Versione aggiornata: se Cd_input è None, usa il modello RHG + r/D + Darcy.
     """
-    # Proprietà monofase liquide di riferimento
-    rho_l = rho_singlephase_at_T(fluid, p1, T_line, side="liq")
-    mu_l  = _safe_viscosity(fluid, p1, T_line, phase="liq")
+    # Proprietà allo stato di uscita: puoi sostituire con quelle effettive del core
+    rho_out = rho_singlephase_at_T(fluid, p1, T_line, side="liq")
+    mu_out  = _safe_viscosity(fluid, p1, T_line, phase="liq")
 
-    if Re_char is None:
-        # Velocità caratteristica fittizia (ordine di grandezza)
-        U_char = 10.0
-        Re_char = rho_l * U_char * D / max(mu_l, 1e-9)
+    beta = D_orif / D_pipe
 
     if Cd_input is not None and Cd_input > 0.0:
         Cd_used = float(Cd_input)
+        # Re comunque calcolato per logging/diagnostica
+        Re_char = _Re_from_mdot_target(mdot_target, D_orif, mu_out)
     else:
-        L_over_D = L / D
-        Cd_used  = estimate_Cd_geom(r_over_D, L_over_D, Re_char)
+        Cd_used, Re_char = estimate_Cd_geom_full(
+            D_orif=D_orif,
+            L=L,
+            r_over_D=r_over_D,
+            beta=beta,
+            mdot_target=mdot_target,
+            rho_out=rho_out,
+            mu_out=mu_out,
+            D_pipe=D_pipe,
+            eps_abs=eps_abs,
+            tap_type="corner",
+        )
 
-    return Cd_used, Re_char, rho_l, mu_l
+    return Cd_used, Re_char, rho_out, mu_out

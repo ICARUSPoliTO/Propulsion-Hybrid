@@ -32,7 +32,7 @@ import math
 import argparse
 from dataclasses import dataclass
 from typing import List, Optional
-
+import mplcursors
 import numpy as np
 
 # ================== BACKEND 0D (V5 / CORE) ==================
@@ -170,10 +170,12 @@ def evaluate_candidate(
     p1_bar: float,
     p2_bar: float,
     T_line: float,
+    mdot_target: float,
     nholes: int,
     r_over_D: float,
     D: float,
     L: float,
+    D_pipe: float,
     Cd_fixed: Optional[float] = None,
 ) -> CandidateResult:
     """
@@ -182,9 +184,33 @@ def evaluate_candidate(
     Usa il backend phase-aware (SPI / NHNE) di V5 per calcolare la portata
     per foro e ricostruire le proprietà a valle (HEM).
 
-    Se Cd_fixed è fornito, bypassa la stima geometrica e usa quel valore
-    (tipicamente da CFD o esperimento). Altrimenti il Cd è stimato dal core
-    in base a geometria e Re caratteristico.
+    Parametri
+    ---------
+    fluid : str
+        Nome CoolProp del fluido.
+    p1_bar, p2_bar : float
+        Pressioni a monte e valle [bar].
+    T_line : float
+        Temperatura della linea a monte [K].
+    mdot_target : float
+        Portata TOTALE target [kg/s] (usata per il Re nella stima di Cd).
+    nholes : int
+        Numero di fori.
+    r_over_D : float
+        Rapporto r/D (raccordo ingresso).
+    D : float
+        Diametro orifizio [m].
+    L : float
+        Lunghezza orifizio [m].
+    D_pipe : float
+        Diametro del condotto a monte (manifold) [m].
+    Cd_fixed : Optional[float]
+        Se fornito > 0, override di Cd (es. da CFD/esperimenti).
+
+    Ritorna
+    -------
+    CandidateResult
+        Risultato con mdot per foro, mdot totale, Cd stimato e Re caratteristico.
     """
     p1 = p1_bar * 1e5
     p2 = p2_bar * 1e5
@@ -196,16 +222,15 @@ def evaluate_candidate(
         fluid=fluid,
         p1=p1,
         T_line=T_line,
-        D=D,
+        D_orif=D,
         L=L,
         r_over_D=r_over_D,
+        D_pipe=D_pipe,
+        mdot_target=mdot_target,
         Cd_input=Cd_fixed,   # None => stima geometrica, >0 => usa dato utente
     )
 
-    # Area foro (serve dopo per Re_eff a posteriori)
-    A_hole = 0.25 * math.pi * D**2
-
-    # --- Portata phase-aware per foro ---
+    # --- Portata phase-aware + stato di uscita ---
     mdot_per_hole, model_used, info = solve_mdot_phaseaware(
         fluid=fluid,
         p1=p1,
@@ -219,12 +244,22 @@ def evaluate_candidate(
     )
 
     phase_out = info.get("phase_from_spi", "unknown")
-    rho_out = info.get("rho_out_spi", rho_l)  # densità miscela per Re_eff
 
-    # --- Re effettivo basato sulla portata finale ---
-    if mdot_per_hole > 0.0 and rho_out > 0.0:
-        U_eff = mdot_per_hole / (rho_out * A_hole)
-        Re_eff = rho_out * abs(U_eff) * D / max(mu_l, 1e-9)
+    # Densità e viscosità miscela per Re_eff
+    rho_mix = info.get("rho_out_spi", rho_l)
+    mu_mix  = info.get("mu_mix", mu_l)
+
+    A_hole = math.pi * (D**2) / 4.0
+
+    # Re effettivo: se il backend un giorno ti restituisce U_out lo usi,
+    # altrimenti lo ricavi dalla portata.
+    U_mix = info.get("U_out", None)
+
+    if (U_mix is not None) and (rho_mix is not None) and (rho_mix > 0.0):
+        Re_eff = rho_mix * abs(U_mix) * D / max(mu_mix, 1e-9)
+    elif mdot_per_hole > 0.0 and (rho_mix is not None) and (rho_mix > 0.0):
+        U_eff = mdot_per_hole / (rho_mix * A_hole)
+        Re_eff = rho_mix * abs(U_eff) * D / max(mu_mix, 1e-9)
     else:
         Re_eff = float("nan")
 
@@ -265,46 +300,59 @@ def design_from_mdot(
     L_over_D_min: float,
     L_over_D_max: float,
     n_LD: int,
+    D_pipe: float,
     n_workers: int = 1,
     Cd_fixed: Optional[float] = None,
 ) -> List[CandidateResult]:
     """
-    Scansiona una griglia 3D in (r/D, D, L/D) e calcola mdot_total per ciascun candidato.
-    Parallelizza via ThreadPoolExecutor se n_workers > 1.
+    Esegue una ricerca su griglia 3D in (r/D, D, L/D) per trovare
+    le geometrie che soddisfano la portata target.
 
-    Se Cd_fixed è fornito, usa quel valore di Cd per tutti i candidati;
-    altrimenti usa la correlazione estimate_Cd(r/D,L/D,Re).
+    Parametri
+    ---------
+    fluid, p1_bar, p2_bar, T_line : come da main().
+    mdot_target : float
+        Portata TOTALE target [kg/s].
+    nholes : int
+        Numero di fori.
+    rD_min, rD_max, n_rD : range e numero di campioni per r/D.
+    D_min, D_max, n_D : range e numero di campioni per D [m].
+    L_over_D_min, L_over_D_max, n_LD : range e numero di campioni per L/D.
+    D_pipe : float
+        Diametro del condotto a monte [m] (usato per β = D_orif / D_pipe).
+    n_workers : int
+        Numero di thread per la valutazione in parallelo.
+    Cd_fixed : Optional[float]
+        Se non None, Cd viene fissato a questo valore (bypass della correlazione).
+
+    Ritorna
+    -------
+    results : List[CandidateResult]
+        Lista con tutti i candidati valutati.
     """
-    if not HAS_PHASEAWARE:
-        raise RuntimeError(
-            "Backend phase-aware non disponibile: controlla pyinjection_core.py."
-        )
-
-    if D_min <= 0.0 or D_max <= 0.0 or D_max <= D_min:
-        raise ValueError("Range D_min, D_max non valido.")
-    if n_D < 2 or n_LD < 2 or n_rD < 1:
-        raise ValueError("Servono almeno: n_D>=2, n_LD>=2, n_rD>=1.")
-
+    # Discretizzazione della griglia
     D_values  = np.linspace(D_min, D_max, n_D)
     LD_values = np.linspace(L_over_D_min, L_over_D_max, n_LD)
     rD_values = np.linspace(rD_min, rD_max, n_rD) if n_rD > 1 else np.array([rD_min])
 
-    # Costruisco la lista di parametri per ogni punto della griglia
+    # Lista di parametri per ogni punto della griglia
     param_list = []
     for r_over_D in rD_values:
         for D in D_values:
             for LD in LD_values:
                 L = LD * D
                 param_list.append((
-                    fluid,
-                    p1_bar,
-                    p2_bar,
-                    T_line,
-                    nholes,
-                    float(r_over_D),
-                    float(D),
-                    float(L),
-                    Cd_fixed,
+                    fluid,           # 0
+                    p1_bar,          # 1
+                    p2_bar,          # 2
+                    T_line,          # 3
+                    mdot_target,     # 4
+                    nholes,          # 5
+                    float(r_over_D), # 6
+                    float(D),        # 7
+                    float(L),        # 8
+                    float(D_pipe),   # 9
+                    Cd_fixed,        # 10
                 ))
 
     results: List[CandidateResult] = []
@@ -315,11 +363,12 @@ def design_from_mdot(
             try:
                 res = _eval_candidate_wrapper(params)
             except Exception as e:
+                # In caso di errore, inserisco un CandidateResult "vuoto" con nota
                 res = CandidateResult(
-                    D=params[6],
-                    L=params[7],
-                    r_over_D=params[5],
-                    L_over_D=params[7]/params[6] if params[6] > 0 else float("nan"),
+                    D=params[7],
+                    L=params[8],
+                    r_over_D=params[6],
+                    L_over_D=params[8] / params[7] if params[7] > 0 else float("nan"),
                     Re=float("nan"),
                     Cd=float("nan"),
                     mdot_total=0.0,
@@ -340,10 +389,10 @@ def design_from_mdot(
                     res = fut.result()
                 except Exception as e:
                     res = CandidateResult(
-                        D=p[6],
-                        L=p[7],
-                        r_over_D=p[5],
-                        L_over_D=p[7]/p[6] if p[6] > 0 else float("nan"),
+                        D=p[7],
+                        L=p[8],
+                        r_over_D=p[6],
+                        L_over_D=p[8] / p[7] if p[7] > 0 else float("nan"),
                         Re=float("nan"),
                         Cd=float("nan"),
                         mdot_total=0.0,
@@ -356,7 +405,6 @@ def design_from_mdot(
                 results.append(res)
 
     return results
-
 
 def _rel_err(res: CandidateResult, mdot_target: float) -> float:
     """Errore relativo (0–1) su mdot_total, oppure inf se non definito."""
@@ -395,69 +443,99 @@ def get_feasible_candidates(results: List[CandidateResult],
 
 
 # ================== PLOT 3D RISULTATI ==================
-def plot_design_map_3d(results: List[CandidateResult],
-                       mdot_target: float,
-                       tol_rel_perc: float) -> None:
+def plot_cd_vs_ratio_by_diameter(results: List[CandidateResult],
+                                 mdot_target: float,
+                                 tol_rel_perc: float) -> None:
     """
-    Crea un grafico 3D scatter nel volume (D [mm], L/D, r/D),
-    colorato in base al rapporto mdot_total / mdot_target.
-    Evidenzia anche i punti che soddisfano il vincolo sulla portata.
+    Grafico 'in stile fronte di Pareto' per i soli candidati che soddisfano
+    il requisito di portata entro una certa tolleranza.
+
+    Ogni punto mostra un tooltip interattivo con:
+        - L/D
+        - r/D
+        - Re
+        - Cd
+        - mdot_ratio
+        - D
     """
     if mdot_target <= 0.0:
-        print("plot_design_map_3d: mdot_target <= 0, salto il plot.")
+        print("plot_cd_vs_ratio_by_diameter: mdot_target <= 0, salto il plot.")
+        return
+
+    # Seleziona i candidati che rispettano il vincolo sulla portata
+    feas = get_feasible_candidates(results, mdot_target, tol_rel_perc)
+    if not feas:
+        print("plot_cd_vs_ratio_by_diameter: nessun candidato entro la tolleranza, nessun grafico.")
         return
 
     try:
         import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
     except ImportError:
         print("matplotlib non disponibile, nessun grafico generato.")
         return
 
-    Dmm     = np.array([r.D * 1e3 for r in results])
-    LD_arr  = np.array([r.L_over_D for r in results])
-    rD_arr  = np.array([r.r_over_D for r in results])
+    # Diametri distinti (in m)
+    unique_D = sorted({round(c.D, 9) for c in feas})
 
-    ratio = np.array([
-        r.mdot_total / mdot_target if (mdot_target > 0.0 and r.mdot_total > 0.0)
-        else np.nan
-        for r in results
-    ])
+    fig, ax = plt.subplots()
 
-    mask_all = np.isfinite(ratio)
-    if not np.any(mask_all):
-        print("plot_design_map_3d: nessun valore valido per la portata, salto il plot.")
-        return
+    cmap = plt.cm.get_cmap("tab10")
 
-    # Maschera per i punti che rispettano la tolleranza
-    tol = tol_rel_perc / 100.0
-    err_rel = np.abs(ratio - 1.0)
-    mask_feas = mask_all & (err_rel <= tol)
+    # Per salvare info dei punti
+    scatter_plots = []
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
+    for idx, D in enumerate(unique_D):
+        group = [c for c in feas if abs(c.D - D) <= 1e-9]
+        if not group:
+            continue
 
-    # Scatter di tutti i punti
-    sc = ax.scatter(Dmm[mask_all], LD_arr[mask_all], rD_arr[mask_all],
-                    c=ratio[mask_all], marker="o", alpha=0.4,
-                    vmin=0.5, vmax=1.5)
-    cb = plt.colorbar(sc, ax=ax, shrink=0.8)
-    cb.set_label("mdot_total / mdot_target")
+        x_cd = [c.Cd for c in group]
+        y_ratio = [c.mdot_total / mdot_target for c in group]
 
-    # Punti che soddisfano il requisito sulla portata (evidenziati)
-    if np.any(mask_feas):
-        ax.scatter(Dmm[mask_feas], LD_arr[mask_feas], rD_arr[mask_feas],
-                   c="red", marker="^", s=40, label=f"|err_rel| <= {tol_rel_perc:.3f}%")
-        ax.legend(loc="best")
+        color = cmap(idx % 10)
+        label = f"D = {D*1e3:.3f} mm (n={len(group)})"
 
-    ax.set_xlabel("D [mm]")
-    ax.set_ylabel("L/D [-]")
-    ax.set_zlabel("r/D [-]")
-    ax.set_title("Design map 3D: mass flow ratio")
+        sc = ax.scatter(x_cd, y_ratio, marker="o", alpha=0.8, label=label, color=color)
+
+        # Salviamo i dati associati a ogni singolo punto
+        sc._candidate_info = group
+        scatter_plots.append(sc)
+
+    # Linea target
+    ax.axhline(1.0, linestyle="--", linewidth=1.0)
+
+    ax.set_xlabel("Cd [-]")
+    ax.set_ylabel("mdot_total / mdot_target [-]")
+    ax.set_title(f"Configurazioni entro {tol_rel_perc:.3f}% sulla portata target")
+
+    ax.grid(True, linestyle=":", linewidth=0.5)
+    ax.legend(loc="best", fontsize="small")
+
+    # -------------------------
+    #  TOOLTIP INTERATTIVO
+    # -------------------------
+    cursor = mplcursors.cursor(scatter_plots, hover=True)
+
+    @cursor.connect("add")
+    def on_hover(sel):
+        sc = sel.artist
+        index = sel.index
+        cand = sc._candidate_info[index]
+
+        text = (
+            f"D = {cand.D*1e3:.3f} mm\n"
+            f"L/D = {cand.L_over_D:.3f}\n"
+            f"r/D = {cand.r_over_D:.3f}\n"
+            f"Re = {cand.Re:.2e}\n"
+            f"Cd = {cand.Cd:.3f}\n"
+            f"mdot_ratio = {cand.mdot_total/mdot_target:.4f}"
+        )
+
+        sel.annotation.set_text(text)
+        sel.annotation.get_bbox_patch().set(fc="white", alpha=0.9)
 
     plt.tight_layout()
     plt.show()
-
 
 # ================== STAMPA RISULTATI ==================
 def print_candidate_table(cands: List[CandidateResult], mdot_target: float) -> None:
@@ -515,6 +593,163 @@ def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
     print(f"note       : {c.note}")
     print("============================================\n")
 
+# ================== SEMPLICE INTERFACCIA GRAFICA (Tkinter) ==================
+def run_gui():
+    """
+    Piccola GUI Tkinter per inserire gli input del design e lanciare la griglia.
+
+    Apre una finestra con i campi principali; alla pressione di "Run design"
+    esegue design_from_mdot(...) e mostra il grafico Cd vs mdot_ratio.
+    """
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+
+    root = tk.Tk()
+    root.title("PyInjection – Injector Design GUI")
+
+    # --------- campi e valori di default (gli stessi del CLI) ----------
+    fields = [
+        ("Fluid (CoolProp)",       "fluid",        "NitrousOxide"),
+        ("P1 [bar]",               "p1_bar",       "55.0"),
+        ("P2 [bar]",               "p2_bar",       "43.0"),
+        ("T_line [K]",             "T_line",       "288.0"),
+        ("mdot target TOTAL [kg/s]","mdot_target", "0.140"),
+        ("Nh (number of holes)",   "Nh",           "1"),
+        ("r/D min",                "rD_min",       "0.05"),
+        ("r/D max",                "rD_max",       "0.35"),
+        ("n_rD",                   "n_rD",         "7"),
+        ("D_min [mm]",             "Dmin_mm",      "0.5"),
+        ("D_max [mm]",             "Dmax_mm",      "3.5"),
+        ("nD",                     "nD",           "25"),
+        ("D_pipe [mm]",            "Dpipe_mm",     "5.0"),
+        ("L/D min",                "LD_min",       "2.0"),
+        ("L/D max",                "LD_max",       "12.0"),
+        ("n_LD",                   "nLD",          "10"),
+        ("tol. rel. [%]",          "tol_rel_perc", "3.0"),
+        ("n_workers",              "n_workers",    "4"),
+        ("Cd fixed (blank = auto)","Cd_fixed",     ""),
+    ]
+
+    entries: dict[str, tk.Entry] = {}
+
+    main_frame = ttk.Frame(root, padding=10)
+    main_frame.grid(row=0, column=0, sticky="nsew")
+
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    for row, (label_text, key, default) in enumerate(fields):
+        lab = ttk.Label(main_frame, text=label_text + ":")
+        lab.grid(row=row, column=0, sticky="e", padx=5, pady=2)
+
+        ent = ttk.Entry(main_frame, width=18)
+        ent.grid(row=row, column=1, sticky="w", padx=5, pady=2)
+        ent.insert(0, default)
+        entries[key] = ent
+
+    # --------- callback del bottone "Run design" ----------
+    def on_run():
+        try:
+            fluid        = entries["fluid"].get().strip() or "NitrousOxide"
+            p1_bar       = float(entries["p1_bar"].get() or 55.0)
+            p2_bar       = float(entries["p2_bar"].get() or 43.0)
+            T_line       = float(entries["T_line"].get() or 288.0)
+            mdot_target  = float(entries["mdot_target"].get() or 0.140)
+            Nh           = int(entries["Nh"].get() or 1)
+
+            rD_min       = float(entries["rD_min"].get() or 0.05)
+            rD_max       = float(entries["rD_max"].get() or 0.35)
+            n_rD         = int(entries["n_rD"].get() or 7)
+
+            Dmin_mm      = float(entries["Dmin_mm"].get() or 0.5)
+            Dmax_mm      = float(entries["Dmax_mm"].get() or 3.5)
+            nD           = int(entries["nD"].get() or 25)
+
+            Dpipe_mm     = float(entries["Dpipe_mm"].get() or 5.0)
+
+            LD_min       = float(entries["LD_min"].get() or 2.0)
+            LD_max       = float(entries["LD_max"].get() or 12.0)
+            nLD          = int(entries["nLD"].get() or 10)
+
+            tol_rel_perc = float(entries["tol_rel_perc"].get() or 3.0)
+            n_workers    = int(entries["n_workers"].get() or 4)
+
+            Cd_fixed_str = entries["Cd_fixed"].get().strip()
+            Cd_fixed     = float(Cd_fixed_str) if Cd_fixed_str else None
+
+        except ValueError as e:
+            messagebox.showerror("Input error", f"Valore non valido: {e}")
+            return
+
+        # Conversioni di unità
+        D_min   = Dmin_mm  * 1e-3
+        D_max   = Dmax_mm  * 1e-3
+        D_pipe  = Dpipe_mm * 1e-3
+
+        # Esegui il design vero e proprio
+        try:
+            results = design_from_mdot(
+                fluid=fluid,
+                p1_bar=p1_bar,
+                p2_bar=p2_bar,
+                T_line=T_line,
+                mdot_target=mdot_target,
+                nholes=Nh,
+                rD_min=rD_min,
+                rD_max=rD_max,
+                n_rD=n_rD,
+                D_min=D_min,
+                D_max=D_max,
+                n_D=nD,
+                L_over_D_min=LD_min,
+                L_over_D_max=LD_max,
+                n_LD=nLD,
+                D_pipe=D_pipe,
+                n_workers=n_workers,
+                Cd_fixed=Cd_fixed,
+            )
+        except Exception as e:
+            messagebox.showerror("Design error", f"Errore durante il design:\n{e}")
+            return
+
+        if not results:
+            messagebox.showwarning("Design", "Nessun risultato generato (lista vuota).")
+            return
+
+        best_overall = select_best_candidates(results, mdot_target, topk=10)
+        feasible     = get_feasible_candidates(results, mdot_target, tol_rel_perc)
+
+        print("\n=== RISULTATI (GUI) – migliori candidati ===")
+        if feasible:
+            to_print = feasible[:10]
+            print_candidate_table(to_print, mdot_target)
+            print(f"... e altri {max(0, len(feasible) - 10)} punti soddisfano il requisito.\n")
+        else:
+            print("(GUI) Nessun candidato entro la tolleranza; stampo i migliori globali\n")
+            print_candidate_table(best_overall, mdot_target)
+
+        # Messaggio breve nella GUI
+        if feasible:
+            messagebox.showinfo(
+                "Design completed",
+                f"Design completato.\nCandidati entro tol.: {len(feasible)}"
+            )
+        else:
+            messagebox.showinfo(
+                "Design completed",
+                "Design completato.\nNessun candidato entro la tolleranza."
+            )
+
+        # Plot
+        try:
+            plot_cd_vs_ratio_by_diameter(results, mdot_target, tol_rel_perc)
+        except Exception as e:
+            messagebox.showwarning("Plot error", f"Errore nella generazione del grafico:\n{e}")
+
+    run_button = ttk.Button(main_frame, text="Run design", command=on_run)
+    run_button.grid(row=len(fields), column=0, columnspan=2, pady=10)
+
+    root.mainloop()
 
 # ================== MAIN / CLI ==================
 def main():
@@ -546,13 +781,17 @@ def main():
     parser.add_argument("--n-rD",   type=int,   default=7,
                         help="Number of r/D samples. Default: 7")
 
-    # Range D
+        # Range D (diametro del foro)
     parser.add_argument("--Dmin-mm", type=float, default=0.5,
                         help="Minimum hole diameter [mm]. Default: 0.5")
     parser.add_argument("--Dmax-mm", type=float, default=3.5,
                         help="Maximum hole diameter [mm]. Default: 3.5")
     parser.add_argument("--nD", type=int, default=25,
                         help="Number of D samples in [Dmin,Dmax]. Default: 25")
+
+    # Diametro del condotto a monte (manifold) per β = D_orif / D_pipe
+    parser.add_argument("--Dpipe-mm", type=float, default=5.0,
+                        help="Manifold (upstream pipe) diameter [mm] for β and RHG. Default: 5.0")
 
     # Range L/D
     parser.add_argument("--LD-min", type=float, default=2.0,
@@ -574,11 +813,15 @@ def main():
     parser.add_argument("--no-plot", action="store_true",
                         help="Disable plotting of the 3D design map.")
 
-    parser.add_argument("--n-workers", type=int, default=24,
-                        help="Number of worker threads for parallel evaluation (1 = serial).")
+    parser.add_argument("--n-workers", type=int, default=1,
+                        help="Number of worker threads for parallel evaluation. Default: 1")
 
     parser.add_argument("--Cd-fixed", type=float, default=None,
-                        help="If provided, use this fixed Cd (per hole) instead of geometric estimation.")
+                        help="If provided, use this fixed Cd instead of geometry-based estimate.")
+    
+    parser.add_argument("--gui", action="store_true",
+                        help="Lancia una semplice GUI Tkinter per l'inserimento degli input.")
+
 
     args = parser.parse_args()
 
@@ -593,9 +836,12 @@ def main():
     rD_max = args.rD_max
     n_rD   = args.n_rD
 
-    Dmin = args.Dmin_mm * 1e-3
-    Dmax = args.Dmax_mm * 1e-3
-    nD   = args.nD
+    Dmin   = args.Dmin_mm * 1e-3
+    Dmax   = args.Dmax_mm * 1e-3
+    nD     = args.nD
+
+    D_pipe = args.Dpipe_mm * 1e-3
+
     LD_min = args.LD_min
     LD_max = args.LD_max
     nLD    = args.nLD
@@ -604,21 +850,28 @@ def main():
     n_workers    = args.n_workers
     Cd_fixed     = args.Cd_fixed
 
+    # Se richiesto, lancia solo la GUI e termina
+    if args.gui:
+        run_gui()
+        return
+
+
     print("=== Injector design setup ===")
     print(f"Fluid        : {fluid}")
     print(f"P1           : {p1_bar:.2f} bar")
     print(f"P2           : {p2_bar:.2f} bar")
     print(f"T_line       : {T_line:.2f} K")
     print(f"mdot target  : {mdot_target:.5f} kg/s (total)")
-    print(f"Nh (holes)   : {Nh}")
+    print(f"Nh (holes)   : {Nh:d}")
     print(f"r/D range    : {rD_min:.3f}–{rD_max:.3f}  (n_rD = {n_rD})")
     print(f"D range      : {args.Dmin_mm:.3f}–{args.Dmax_mm:.3f} mm  (nD = {nD})")
+    print(f"D_pipe       : {args.Dpipe_mm:.3f} mm (manifold)")
     print(f"L/D range    : {LD_min:.2f}–{LD_max:.2f}  (nLD = {nLD})")
     print(f"tol_rel      : {tol_rel_perc:.3f} %")
     if Cd_fixed is not None:
         print(f"Cd (fixed)   : {Cd_fixed:.4f}")
     else:
-        print("Cd mode      : estimated from geometry (r/D, L/D, Re)")
+        print("Cd mode      : estimated from geometry (RHG + r/D + Darcy)")
     print(f"Workers      : {n_workers}")
     print("")
 
@@ -638,6 +891,7 @@ def main():
         L_over_D_min=LD_min,
         L_over_D_max=LD_max,
         n_LD=nLD,
+        D_pipe=D_pipe,
         n_workers=n_workers,
         Cd_fixed=Cd_fixed,
     )
@@ -664,32 +918,15 @@ def main():
         print("(nessun candidato soddisfa la tolleranza su mdot; stampo i migliori globali)\n")
         print_candidate_table(best_overall, mdot_target)
 
-    # Tabellina riassuntiva per il miglior candidato globale
-    best_cand = best_overall[0]
-    print_best_candidate(best_cand, mdot_target)
-
-    # Export CSV opzionale
-    if args.csv_out is not None:
-        import csv
-        with open(args.csv_out, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "D[m]", "L[m]", "r_over_D", "L_over_D", "Re", "Cd",
-                "nh", "mdot_total[kg/s]", "mdot_per_hole[kg/s]",
-                "rho_l[kg/m3]", "mu_l[Pa*s]", "note"
-            ])
-            for c in results:
-                w.writerow([
-                    c.D, c.L, c.r_over_D, c.L_over_D, c.Re, c.Cd,
-                    c.nh, c.mdot_total, c.mdot_per_hole,
-                    c.rho_l, c.mu_l, c.note
-                ])
-        print(f"\nFull grid results written to: {args.csv_out}\n")
-
-    # Plot 3D
+    # Plot "in stile Pareto" Cd vs mdot_ratio per i diametri che soddisfano il vincolo
     if not args.no_plot:
-        plot_design_map_3d(results, mdot_target, tol_rel_perc)
-
+        plot_cd_vs_ratio_by_diameter(results, mdot_target, tol_rel_perc)
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    # Se l'utente lancia il file SENZA argomenti => apri direttamente la GUI
+    if len(sys.argv) == 1:
+        run_gui()
+    else:
+        main()
