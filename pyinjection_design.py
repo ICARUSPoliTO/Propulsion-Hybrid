@@ -381,8 +381,10 @@ def design_from_mdot(
             results.append(res)
     else:
         # Parallelizzazione con thread
+        import multiprocessing
+        n_workers = multiprocessing.cpu_count() - 1
         import concurrent.futures as cf
-        with cf.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        with cf.ProcessPoolExecutor(max_workers=n_workers) as ex:
             futures = [ex.submit(_eval_candidate_wrapper, p) for p in param_list]
             for p, fut in zip(param_list, futures):
                 try:
