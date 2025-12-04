@@ -489,7 +489,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         Cd_source = "user-provided Cd"
         Re_ref = None  # optional
 
-    # ---- 2) SPI / HEM / NHNE + phase-aware mass flow rates (per hole) ----
+        # ---- 2) SPI / HEM / NHNE + phase-aware mass flow rates (per hole) ----
     mdot_spi_one = _mdot_spi(
         fluid, p1_bar, p2_bar, T_line, D, Cd,
         use_compress=use_spi_comp, n_isentropic=spi_n
@@ -516,13 +516,13 @@ def run_performance_case(fluid: str = "NitrousOxide",
         K_RESIDENCE=0.0,
     )
 
-    # ---- Total mass flows (sum over Nh holes) ----
+    # Total mass flow rates (all holes)
     mdot_spi  = Nh * mdot_spi_one
     mdot_hem  = Nh * mdot_hem_one
     mdot_nhne = Nh * mdot_nhne_one
     mdot_pa   = Nh * mdot_pa_one
 
-    # ---- 3) Outlet state per hole, consistent with mdot_pa_one ----
+    # ---- 3) Outlet state per hole, consistent with NHNE mass flow ----
     p1 = p1_bar * 1e5
     p2 = p2_bar * 1e5
 
@@ -532,7 +532,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         p2=p2,
         T_line=T_line,
         D=D,
-        mdot_nhne=mdot_pa_one,   # per-hole mdot
+        mdot_nhne=mdot_nhne_one,   # per-hole mdot (NHNE)
         h1_hint=None,
     )
 

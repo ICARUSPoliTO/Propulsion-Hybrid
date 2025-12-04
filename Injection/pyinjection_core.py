@@ -231,7 +231,6 @@ def _mdot_spi(
 
     return mdot_spi / math.sqrt(max(1.0 + Yp, 1e-6))
 
-
 def _mdot_hem(
     fluid: str,
     p1_bar: float,
@@ -245,16 +244,35 @@ def _mdot_hem(
 
       - h1 from (P1, T_line) or from saturated liquid (Q=0)
       - iteration on h2 and rho(P2, H2)
+
+    In addition, we impose a physical upper bound:
+    the HEM mass flow rate cannot exceed the incompressible
+    single-phase SPI mass flow rate with the same Cd.
     """
     if D <= 0.0 or Cd <= 0.0 or p1_bar <= p2_bar:
         return 0.0
 
-    p1, p2 = _pkey(p1_bar * 1e5), _pkey(p2_bar * 1e5)
+    # --- Physical upper bound: incompressible SPI with same Cd ---
+    mdot_spi_upper = _mdot_spi(
+        fluid=fluid,
+        p1_bar=p1_bar,
+        p2_bar=p2_bar,
+        T_line=T_line,
+        D=D,
+        Cd=Cd,
+        use_compress=False,   # incompressible reference
+        n_isentropic=None,
+    )
+
+    p1 = _pkey(p1_bar * 1e5)
+    p2 = _pkey(p2_bar * 1e5)
     A = 0.25 * math.pi * D * D
 
+    # Upstream enthalpy
     try:
         h1 = cp.PropsSI("H", "P", p1, "T", T_line, fluid)
     except Exception:
+        # fallback: saturated liquid
         h1 = cp.PropsSI("H", "P", p1, "Q", 0, fluid)
 
     # Initial guess: liquid at outlet
@@ -288,7 +306,13 @@ def _mdot_hem(
 
         mdot, rho0 = mdot_new, rho
 
-    return max(mdot, 0.0)
+    # Final clamp: HEM cannot exceed incompressible SPI
+    mdot = max(mdot, 0.0)
+    if mdot_spi_upper > 0.0 and mdot > mdot_spi_upper:
+        mdot = mdot_spi_upper
+
+    return mdot
+
 
 
 def _mdot_nhne(
