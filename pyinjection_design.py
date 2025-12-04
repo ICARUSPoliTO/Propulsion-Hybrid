@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 import mplcursors
 import numpy as np
+import multiprocessing
 
 # ================== BACKEND 0D (V5 / CORE) ==================
 try:
@@ -381,8 +382,7 @@ def design_from_mdot(
             results.append(res)
     else:
         # Parallelizzazione con thread
-        import multiprocessing
-        n_workers = multiprocessing.cpu_count() - 1
+        
         import concurrent.futures as cf
         with cf.ProcessPoolExecutor(max_workers=n_workers) as ex:
             futures = [ex.submit(_eval_candidate_wrapper, p) for p in param_list]
@@ -707,7 +707,7 @@ def run_gui():
                 L_over_D_max=LD_max,
                 n_LD=nLD,
                 D_pipe=D_pipe,
-                n_workers=n_workers,
+                n_workers = multiprocessing.cpu_count() - 1,
                 Cd_fixed=Cd_fixed,
             )
         except Exception as e:
@@ -894,7 +894,7 @@ def main():
         L_over_D_max=LD_max,
         n_LD=nLD,
         D_pipe=D_pipe,
-        n_workers=n_workers,
+        n_workers = multiprocessing.cpu_count() - 1,
         Cd_fixed=Cd_fixed,
     )
 
