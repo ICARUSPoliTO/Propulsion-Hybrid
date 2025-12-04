@@ -129,7 +129,7 @@ def estimate_Cd_from_geometry_perf(
 
 
 # ============================================================
-#  TABLE PRINTING UTILITIES
+#  TABLE PRINTING UTILITIES (console)
 # ============================================================
 
 def _print_table(title: str,
@@ -159,7 +159,7 @@ def _print_table(title: str,
 
 
 # ============================================================
-#  INPUT TABLE
+#  INPUT TABLE (console)
 # ============================================================
 
 def print_inputs_table(params: Dict[str, Any]) -> None:
@@ -215,7 +215,7 @@ def print_inputs_table(params: Dict[str, Any]) -> None:
 
 
 # ============================================================
-#  MASS FLOW TABLE
+#  MASS FLOW TABLE (console)
 # ============================================================
 
 def print_mdot_table(mdot_spi: float,
@@ -238,7 +238,7 @@ def print_mdot_table(mdot_spi: float,
 
 
 # ============================================================
-#  OUTLET PHASE PROPERTIES TABLE
+#  OUTLET PHASE PROPERTIES TABLE (console)
 # ============================================================
 
 def print_phase_properties_table(fluid: str,
@@ -378,7 +378,7 @@ def print_phase_properties_table(fluid: str,
     )
 
 # ============================================================
-#  MAIN MIXTURE RESULTS TABLE
+#  MAIN MIXTURE RESULTS TABLE (console)
 # ============================================================
 
 def print_main_results_table(mdot_pa: float,
@@ -467,7 +467,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
     Outlet properties are per hole.
 
     keep_area:
-        True  -> nella tabella di input l'opzione "Keep A_tot const (Nh)" è ON
+        True  -> in the input table the option "Keep A_tot const (Nh)" is ON
         False -> OFF.
     """
     Nh = max(int(Nh), 1)
@@ -779,21 +779,21 @@ def show_output_tables_gui(fluid: str,
         r_val = float("nan")
         D_ref = float("nan")
 
-    # Se Cd_mode = "user", L e r non sono stati inseriti → mostriamo "-"
+    # If Cd_mode = "user", L and r have not been entered → show "-"
     if Cd_mode == "user":
         L_str = "-"
         r_str = "-"
         L_over_D_str = "-"
         r_over_D_str = "-"
     else:
-        L_str = f"{L:.6f}"
-        r_str = f"{r_val:.6f}"
+        L_str = f"{L:.3e}"
+        r_str = f"{r_val:.3e}"
         L_over_D_str = f"{L_over_D_val:.3f}"
-        r_over_D_str = f"{r_over_D:.5f}"
+        r_over_D_str = f"{r_over_D:.3f}"
 
-    # Cd_source: se stimato dalla geometria, mostriamo il valore numerico
+    # Cd_source: if estimated from geometry, show the numeric Cd value
     if Cd_mode == "geom":
-        Cd_source_display = f"{Cd:.4f}"
+        Cd_source_display = f"{Cd:.3f}"
     else:
         Cd_source_display = Cd_source
 
@@ -802,16 +802,16 @@ def show_output_tables_gui(fluid: str,
         {"param": "T_line [K]",           "val": f"{T_line:.3f}"},
         {"param": "P1 [bar]",             "val": f"{p1_bar:.3f}"},
         {"param": "P2 [bar]",             "val": f"{p2_bar:.3f}"},
-        {"param": "Orifice D_hole [m]",   "val": f"{D:.6f}"},
-        {"param": "D_ref [m] (equiv.)",   "val": f"{D_ref:.6f}"},
+        {"param": "Orifice D_hole [m]",   "val": f"{D:.3e}"},
+        {"param": "D_ref [m] (equiv.)",   "val": f"{D_ref:.3e}"},
         {"param": "Orifice L [m]",        "val": L_str},
         {"param": "L/D [-]",              "val": L_over_D_str},
         {"param": "Edge radius r [m]",    "val": r_str},
         {"param": "r/D [-]",              "val": r_over_D_str},
         {"param": "Nh [-]",               "val": f"{Nh:d}"},
-        {"param": "A_h [m^2]",            "val": f"{A_hole:.8e}"},
-        {"param": "A_tot [m^2]",          "val": f"{A_tot:.8e}"},
-        {"param": "Cd [-]",               "val": f"{Cd:.4f}"},
+        {"param": "A_h [m^2]",            "val": f"{A_hole:.3e}"},
+        {"param": "A_tot [m^2]",          "val": f"{A_tot:.3e}"},
+        {"param": "Cd [-]",               "val": f"{Cd:.3f}"},
         {"param": "Cd mode",              "val": Cd_mode},
         {"param": "Cd source",            "val": Cd_source_display},
         {"param": "Keep A_tot const (Nh)","val": "ON" if keep_area else "OFF"},
@@ -854,6 +854,34 @@ def show_output_tables_gui(fluid: str,
     ax_mdot.axis("off")
     ax_mix.axis("off")
 
+    # ---------- helper for numeric formatting in GUI tables ----------
+    def _format_number(val, label: str = "") -> str:
+        """
+        GUI formatter:
+        - 3 decimal digits for all values
+        - Re shown as a*bcd*10^n (e.g. 2.945*10^5)
+        - automatic switch to scientific notation for very large/small values
+        """
+        if not isinstance(val, (int, float)):
+            return "-"
+        if not _math.isfinite(val):
+            return "NaN"
+
+        # Reynolds in scientific notation with "*10^"
+        if "Re" in label:
+            if val == 0.0:
+                return "0.000"
+            exp = int(_math.floor(_math.log10(abs(val))))
+            mant = val / (10.0 ** exp)
+            return f"{mant:.3f}*10^{exp:d}"
+
+        abs_v = abs(val)
+        # Use scientific notation for very large/small values
+        if abs_v != 0.0 and (abs_v < 1e-3 or abs_v >= 1e4):
+            return f"{val:.3e}"
+        else:
+            return f"{val:.3f}"
+
     # ---------- INPUT Table ----------
     header_input = [c[0] for c in cols_input]
     data_input = [header_input] + [[r["param"], r["val"]] for r in rows_input]
@@ -873,10 +901,10 @@ def show_output_tables_gui(fluid: str,
     data_mdot = [header_mdot]
     for r in rows_mdot:
         row_vals = []
-        for (_, key) in cols_mdot:
+        for (col_label, key) in cols_mdot:
             val = r.get(key, None)
             if isinstance(val, (int, float)) and val is not None:
-                row_vals.append(f"{val:.6g}" if _math.isfinite(val) else "NaN")
+                row_vals.append(_format_number(val, label=col_label))
             elif val is None:
                 row_vals.append("-")
             else:
@@ -926,7 +954,7 @@ def show_output_tables_gui(fluid: str,
         for ph in phase_names[:2]:
             val = phase_dict.get(ph, {}).get(key, None)
             if isinstance(val, (int, float)) and val is not None:
-                row_vals.append(f"{val:.6g}" if _math.isfinite(val) else "NaN")
+                row_vals.append(_format_number(val, label=label))
             elif val is None:
                 row_vals.append("-")
             else:
@@ -965,7 +993,7 @@ def show_output_tables_gui(fluid: str,
     for label, key in prop_mix:
         val = mix_row.get(key, None)
         if isinstance(val, (int, float)) and val is not None:
-            sval = f"{val:.6g}" if _math.isfinite(val) else "NaN"
+            sval = _format_number(val, label=label)
         elif val is None:
             sval = "-"
         else:
@@ -1094,7 +1122,7 @@ def launch_gui():
     updating_Dref  = {"flag": False}
     updating_Nh    = {"flag": False}
 
-        # =========================
+    # =========================
     #  Derived quantities update
     # =========================
     def _update_derived():
@@ -1356,17 +1384,17 @@ def launch_gui():
     )
     cd_option.grid(row=row, column=1, sticky="w", pady=(4, 2))
 
-    # ======= Gestione Cd_mode: abilita/disabilita L e r =======
+    # ======= Cd_mode handling: enable/disable L and r =======
     def _update_cd_entry_state(*_):
-        # Cd: editabile solo in modalità "user"
+        # Cd: editable only in "user" mode
         if Cd_mode_var.get() == "geom":
             cd_entry.config(state="readonly")
         else:
             cd_entry.config(state="normal")
 
-        # L e r: usati solo per Cd geom → in "user" si oscurano e mostrano "-"
+        # L and r: used only for geometric Cd → in "user" mode they are disabled and shown as "-"
         if Cd_mode_var.get() == "geom":
-            # torna a numerico, editabile
+            # back to numeric, editable
             if L_var.get().strip() == "-":
                 L_var.set("0.010")
             if r_var.get().strip() == "-":
@@ -1374,7 +1402,7 @@ def launch_gui():
             L_entry.config(state="normal")
             r_entry.config(state="normal")
         else:
-            # modalità user: L e r non usati → li oscuriamo e li mettiamo a "-"
+            # user mode: L and r not used → disabled and shown as "-"
             L_entry.config(state="readonly")
             r_entry.config(state="readonly")
             L_var.set("-")
@@ -1443,12 +1471,12 @@ def launch_gui():
     )
     ToolTip(
         d_entry,
-        "diameter of each single holeof the injector D [m].\n"
+        "Diameter of each single hole of the injector D [m].\n"
         "Also used to compute L/D and r/D."
     )
     ToolTip(
         dref_entry,
-        "Equivalent of single-orifice diameter D_ref [m].\n"
+        "Equivalent single-orifice diameter D_ref [m].\n"
         "When 'Keep total area' is checked, D_ref is the primary input."
     )
     ToolTip(
@@ -1537,14 +1565,14 @@ def launch_gui():
 
             Cd_mode = Cd_mode_var.get()
 
-            # L e r: SOLO se geom, altrimenti non li leggiamo (sono "-")
+            # L and r: ONLY if geom, otherwise we do not read them (they are "-")
             if Cd_mode == "geom":
                 L = float(L_var.get())
                 r = float(r_var.get())
                 r_over_D = r / D if D > 0.0 else float("nan")
                 rD_var.set(f"{r_over_D:.5f}")
             else:
-                # in modalità user non servono alla fisica del Cd geom
+                # in user mode they are not used by the geometric Cd
                 L = 0.0
                 r = 0.0
                 r_over_D = float("nan")
@@ -1596,8 +1624,8 @@ def launch_gui():
         Cd_source_var.set(Cd_source_str)
         Cd_var.set(f"{Cd:.4f}")
 
-        # L e r sono significativi solo in modalità geom; in user li abbiamo
-        # già posti a 0.0 / nan e non vengono usati dalla fisica.
+        # L and r are meaningful only in geom mode; in user mode we already set them
+        # to 0.0 / nan and they are not used by the physics.
         run_performance_case(
             fluid=fluid,
             p1_bar=p1_bar,
