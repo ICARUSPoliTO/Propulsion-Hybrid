@@ -1627,7 +1627,7 @@ def launch_gui():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Single-case N2O plain-orifice injector (phase-aware backend + tables)."
+        description="Single-case N2O multi-orifice injector (phase-aware backend + tables)."
     )
     parser.add_argument("--p1", type=float, default=55.0,
                         help="P1 inlet pressure [bar] (default: 55)")
@@ -1658,6 +1658,8 @@ def main():
                         help="Launch graphical input interface")
     parser.add_argument("--Nh", type=int, default=1,
                         help="Number of identical orifices (holes) (default: 1)")
+    parser.add_argument("--n-holes", dest="Nh", type=int, default=1,
+                        help="Alias: number of identical orifices (same as --Nh)")
 
 
     args = parser.parse_args()
