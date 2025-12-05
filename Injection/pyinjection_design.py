@@ -677,9 +677,9 @@ def run_gui():
         * esegue design_from_mdot(...)
         * apre una finestra matplotlib con:
               - tabella INPUT (sinistra)
-              - tabella BEST CANDIDATES (destra, compatta)
+              - tabella BEST CANDIDATES (destra)
         * chiama plot_cd_vs_ratio_by_diameter(...) che genera il grafico
-          originale in una seconda finestra, senza modificarlo.
+          in basso a destra.
     """
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -721,8 +721,9 @@ def run_gui():
             self.tip_window = None
             if tw is not None:
                 tw.destroy()
+
     # -----------------------------------------------------
-    #  Output figure con tabelle + grafico (layout migliorato)
+    #  Output figure con tabelle + grafico
     # -----------------------------------------------------
     def show_output_window(_root,
                            input_params: dict[str, str],
@@ -734,22 +735,16 @@ def run_gui():
         Crea una figura matplotlib con:
           - tabella INPUT (in alto a sinistra)
           - tabella BEST CANDIDATES (in alto a destra)
-          - grafico Cd vs mdot_total/mdot_target (in basso, sotto la tabella dei best).
-
-        Formattazione:
-          - tabella input: tutti i valori numerici con 3 cifre decimali
-            (fixed o scientifica, a seconda dell'ordine di grandezza);
-          - tabella best: 3 decimali per tutti, Re come a*10^b;
-          - altezza righe aumentata e uguale per entrambe le tabelle.
+          - grafico Cd vs mdot_total/mdot_target (in basso a destra).
         """
 
-        # ----------- Tabella INPUT -----------
+        # ----------- Tabella INPUT ----------- 
         ordered_keys = [
             "Fluid",
             "P1 [bar]",
             "P2 [bar]",
             "T_line [K]",
-            "mdot target TOTAL [kg/s]",
+            "mdot target total [kg/s]",
             "Nh [-]",
             "r/D min",
             "r/D max",
@@ -766,34 +761,26 @@ def run_gui():
             "Cd fixed",
             "SPI compressible",
             "n SPI",
-            "Keep A_tot const (Nh)",
-            "D_ref [m] (equiv., best)",
-            "A_h [m^2] (per hole, best)",
-            "A_tot [m^2] (total, best)",
         ]
 
         def format_input_value(raw: str) -> str:
             """
-            Prova a portare il valore a 3 cifre decimali.
-            - Per valori "normali": formato fisso con 3 decimali.
-            - Per valori molto piccoli o molto grandi: scientifico con 3 decimali.
-            Se non è numerico, viene restituito così com'è.
+            Porta il valore a ~3 cifre decimali (fisso o scientifico).
+            Se non è numerico, restituisce la stringa originale.
             """
             s = raw.strip()
             try:
                 x = float(s)
             except Exception:
-                return raw  # stringa non numerica
+                return raw
 
             if not math.isfinite(x):
                 return raw
 
             ax = abs(x)
             if (ax != 0.0) and (ax < 1e-3 or ax >= 1e4 or "e" in s.lower()):
-                # scientifico con 3 decimali nella mantissa
                 return f"{x:.3e}"
             else:
-                # formato fisso con 3 decimali
                 return f"{x:.3f}"
 
         header_input = ["Parameter", "Value"]
@@ -803,7 +790,7 @@ def run_gui():
                 raw_val = input_params[k]
                 data_input.append([k, format_input_value(raw_val)])
 
-        # ----------- Tabella BEST CANDIDATES -----------
+        # ----------- Tabella BEST CANDIDATES ----------- 
         metric_labels = [
             "#",
             "D [mm]",
@@ -864,33 +851,29 @@ def run_gui():
                 row.append(sval)
             data_best.append(row)
 
-        # ----------- Figura: 2 righe x 2 colonne -----------
-
+        # ----------- Figura: 2 righe x 2 colonne ----------- 
         fig_w = 14.0
         fig_h = 9.0
 
         fig = plt.figure(figsize=(fig_w, fig_h))
         fig.canvas.manager.set_window_title("PyInjection – Design results")
 
-        from matplotlib.gridspec import GridSpec
         gs = GridSpec(
             2, 2,
-            height_ratios=[0.9, 1.6],   # più spazio al grafico
-            width_ratios=[1.0, 1.8],    # più spazio alla tabella dei best / grafico
+            height_ratios=[0.9, 1.6],
+            width_ratios=[1.0, 1.8],
             figure=fig,
         )
 
         ax_input = fig.add_subplot(gs[0, 0])
         ax_best  = fig.add_subplot(gs[0, 1])
         ax_plot  = fig.add_subplot(gs[1, 1])
-
-        ax_bl = fig.add_subplot(gs[1, 0])
-        ax_bl.axis("off")
+        ax_bl    = fig.add_subplot(gs[1, 0])
 
         ax_input.axis("off")
         ax_best.axis("off")
+        ax_bl.axis("off")
 
-        # Titoli
         ax_input.set_title(
             "Input parameters",
             fontsize=11,
@@ -905,7 +888,7 @@ def run_gui():
             pad=8,
         )
 
-        # ---------- Tabella INPUT ----------
+        # Tabella input
         tab_input = ax_input.table(
             cellText=data_input,
             loc="upper center",
@@ -913,7 +896,6 @@ def run_gui():
         )
         tab_input.auto_set_font_size(False)
         tab_input.set_fontsize(9)
-        # stessa scala per entrambe le tabelle, altezza righe aumentata
         tab_input.scale(1.3, 1.8)
 
         for (row, col), cell in tab_input.get_celld().items():
@@ -921,7 +903,7 @@ def run_gui():
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
-        # ---------- Tabella BEST CANDIDATES ----------
+        # Tabella best
         tab_best = ax_best.table(
             cellText=data_best,
             loc="upper center",
@@ -929,7 +911,7 @@ def run_gui():
         )
         tab_best.auto_set_font_size(False)
         tab_best.set_fontsize(9)
-        tab_best.scale(1.3, 1.8)  # stessa scala verticale dell'input
+        tab_best.scale(1.3, 1.8)
 
         n_rows_best = len(data_best)
         n_cols_best = len(data_best[0])
@@ -939,13 +921,12 @@ def run_gui():
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
-        # larghezza colonne adattata automaticamente al contenuto
         try:
             tab_best.auto_set_column_width(list(range(n_cols_best)))
         except Exception:
             pass
 
-        # ---------- Grafico sotto la tabella dei best ----------
+        # Grafico
         ax_plot.clear()
         plot_cd_vs_ratio_by_diameter(
             results_all,
@@ -973,29 +954,26 @@ def run_gui():
 
     # ----- text entries -----
     fields = [
-        ("Fluid (CoolProp)",        "fluid",        "NitrousOxide"),
-        ("P1 [bar]",                "p1_bar",       "55.0"),
-        ("P2 [bar]",                "p2_bar",       "43.0"),
-        ("T_line [K]",              "T_line",       "288.0"),
-        ("mdot target TOTAL [kg/s]","mdot_target",  "0.140"),
-        ("Nh (number of holes)",    "Nh",           "1"),
-        ("r/D min",                 "rD_min",       "0.05"),
-        ("r/D max",                 "rD_max",       "0.35"),
-        ("n_rD",                    "n_rD",         "7"),
-        ("D_min [mm]",              "Dmin_mm",      "0.5"),
-        ("D_max [mm]",              "Dmax_mm",      "3.5"),
-        ("nD",                      "nD",           "25"),
-        ("D_pipe [mm]",             "Dpipe_mm",     "5.0"),
-        ("L/D min",                 "LD_min",       "2.0"),
-        ("L/D max",                 "LD_max",       "12.0"),
-        ("n_LD",                    "nLD",          "10"),
-        ("tol. rel. [%]",           "tol_rel_perc", "3.0"),
-        ("n_workers",               "n_workers",    "4"),
-        ("Cd fixed (blank = auto)", "Cd_fixed",     ""),
-        ("n SPI (optional)",        "spi_n",        "1.2"),
-        ("D_ref [m] (equiv., best)","D_ref",        ""),
-        ("A_h [m^2] (per hole)",    "A_h",          ""),
-        ("A_tot [m^2] (total)",     "A_tot",        ""),
+        ("Fluid (CoolProp)",         "fluid",        "NitrousOxide"),
+        ("P1 [bar]",                 "p1_bar",       "55.0"),
+        ("P2 [bar]",                 "p2_bar",       "43.0"),
+        ("T_line [K]",               "T_line",       "288.0"),
+        ("mdot target total [kg/s]", "mdot_target",  "0.140"),
+        ("Nh (number of holes)",     "Nh",           "1"),
+        ("r/D min",                  "rD_min",       "0.05"),
+        ("r/D max",                  "rD_max",       "0.35"),
+        ("n_rD",                     "n_rD",         "7"),
+        ("D_min [mm]",               "Dmin_mm",      "0.5"),
+        ("D_max [mm]",               "Dmax_mm",      "3.5"),
+        ("nD",                       "nD",           "25"),
+        ("D_pipe [mm]",              "Dpipe_mm",     "5.0"),
+        ("L/D min",                  "LD_min",       "2.0"),
+        ("L/D max",                  "LD_max",       "12.0"),
+        ("n_LD",                     "nLD",          "10"),
+        ("tol. rel. [%]",            "tol_rel_perc", "3.0"),
+        ("n_workers",                "n_workers",    "6"),
+        ("Cd fixed (blank = auto)",  "Cd_fixed",     ""),
+        ("n SPI (optional)",         "spi_n",        "1.2"),
     ]
 
     entries: dict[str, tk.Entry] = {}
@@ -1014,28 +992,17 @@ def run_gui():
         return ent
 
     for label_text, key, default in fields:
-        ent = add_entry(label_text, key, default)
-        if key in ("D_ref", "A_h", "A_tot"):
-            ent.config(state="readonly")
+        add_entry(label_text, key, default)
 
-    # ----- Checkbuttons -----
+    # ----- Checkbutton SPI compress -----
     spi_comp_var = tk.BooleanVar(value=True)
-    keep_area_var = tk.BooleanVar(value=False)
 
     chk_spi = ttk.Checkbutton(
         main_frame,
         text="Use SPI compressible correction",
         variable=spi_comp_var,
     )
-    chk_spi.grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
-    row += 1
-
-    chk_keep_area = ttk.Checkbutton(
-        main_frame,
-        text="Keep total area A_tot constant when Nh changes (informational flag)",
-        variable=keep_area_var,
-    )
-    chk_keep_area.grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 8))
+    chk_spi.grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 8))
     row += 1
 
     # -----------------------------
@@ -1045,7 +1012,7 @@ def run_gui():
     ToolTip(entries["T_line"], "Feeding-line bulk temperature [K].")
     ToolTip(entries["p1_bar"], "Upstream/inlet pressure P1 [bar].")
     ToolTip(entries["p2_bar"], "Back pressure P2 [bar].")
-    ToolTip(entries["mdot_target"], "TOTAL target mass flow rate [kg/s].")
+    ToolTip(entries["mdot_target"], "Total target mass flow rate [kg/s].")
     ToolTip(entries["Nh"], "Number of identical injector holes Nh.")
     ToolTip(entries["rD_min"], "Minimum edge-radius ratio r/D explored in the grid.")
     ToolTip(entries["rD_max"], "Maximum edge-radius ratio r/D explored in the grid.")
@@ -1058,14 +1025,10 @@ def run_gui():
     ToolTip(entries["LD_max"], "Maximum aspect ratio L/D.")
     ToolTip(entries["nLD"], "Number of samples in the L/D range.")
     ToolTip(entries["tol_rel_perc"], "Relative mass-flow tolerance [%].")
-    ToolTip(entries["n_workers"], "Number of worker threads for the grid evaluation.")
+    ToolTip(entries["n_workers"], "Number of worker processes for the grid evaluation.")
     ToolTip(entries["Cd_fixed"], "If blank, Cd is estimated from geometry.")
     ToolTip(entries["spi_n"], "Isentropic exponent n used in SPI compressible correction.")
-    ToolTip(entries["D_ref"], "Equivalent single-orifice diameter D_ref [m] for BEST candidate.")
-    ToolTip(entries["A_h"], "Per-hole area A_h [m^2] for BEST candidate.")
-    ToolTip(entries["A_tot"], "Total injector area A_tot [m^2] for BEST candidate.")
     ToolTip(chk_spi, "If checked, SPI uses compressible correction with exponent n.")
-    ToolTip(chk_keep_area, "Informational flag: keep A_tot constant when changing Nh.")
 
     # -----------------------------
     #  Run button callback
@@ -1124,16 +1087,17 @@ def run_gui():
                 spi_n_val = None
 
             use_spi_compress = bool(spi_comp_var.get())
-            keep_area_flag   = bool(keep_area_var.get())
 
         except ValueError as e:
             messagebox.showerror("Input error", f"Invalid numeric value:\n{e}")
             return
 
+        # Conversione mm -> m
         D_min   = Dmin_mm  * 1e-3
         D_max   = Dmax_mm  * 1e-3
         D_pipe  = Dpipe_mm * 1e-3
 
+        # Esecuzione design
         try:
             results = design_from_mdot(
                 fluid=fluid,
@@ -1179,32 +1143,13 @@ def run_gui():
                 "showing global best candidates."
             )
 
-        # Aggiorna D_ref, A_h, A_tot dal best candidate
-        if cand_to_show:
-            best0 = cand_to_show[0]
-            D_best = best0.D
-            Nh_eff = Nh
-            A_h = math.pi * (D_best ** 2) / 4.0
-            A_tot = A_h * Nh_eff
-            D_ref = D_best * math.sqrt(Nh_eff)
-
-            for key, val, fmt in [
-                ("D_ref", D_ref, "{:.6f}"),
-                ("A_h",   A_h,   "{:.8e}"),
-                ("A_tot", A_tot, "{:.8e}"),
-            ]:
-                ent = entries[key]
-                ent.config(state="normal")
-                ent.delete(0, tk.END)
-                ent.insert(0, fmt.format(val))
-                ent.config(state="readonly")
-
+        # Dizionario parametri di input per la tabella
         input_params = {
             "Fluid": fluid,
             "P1 [bar]": f"{p1_bar:.3f}",
             "P2 [bar]": f"{p2_bar:.3f}",
             "T_line [K]": f"{T_line:.3f}",
-            "mdot target TOTAL [kg/s]": f"{mdot_target:.6f}",
+            "mdot target total [kg/s]": f"{mdot_target:.6f}",
             "Nh [-]": f"{Nh:d}",
             "r/D min": f"{rD_min:.4f}",
             "r/D max": f"{rD_max:.4f}",
@@ -1221,18 +1166,12 @@ def run_gui():
             "Cd fixed": ("auto (geom)" if Cd_fixed is None else f"{Cd_fixed:.4f}"),
             "SPI compressible": "ON" if use_spi_compress else "OFF",
             "n SPI": ("default" if spi_n_val is None else f"{spi_n_val:.3f}"),
-            "Keep A_tot const (Nh)": "ON" if keep_area_flag else "OFF",
-            "D_ref [m] (equiv., best)": entries["D_ref"].get(),
-            "A_h [m^2] (per hole, best)": entries["A_h"].get(),
-            "A_tot [m^2] (total, best)": entries["A_tot"].get(),
         }
 
-        # Unica figura con tabelle + grafico
         show_output_window(root, input_params, cand_to_show,
                            mdot_target, tol_rel_perc, results)
 
         messagebox.showinfo("Design completed", msg)
-
 
     run_button = ttk.Button(main_frame, text="Run design", command=on_run)
     run_button.grid(row=row, column=0, columnspan=2, pady=6, sticky="ew")
