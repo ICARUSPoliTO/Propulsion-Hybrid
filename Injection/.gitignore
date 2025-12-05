@@ -1,5 +1,0 @@
-.venv/
-.vscode/
-__pycache__/
-# *.pyc per ignorare tutti i file con estensione .pyc, in generale vale per tutte le estensioni
-# !*.pyc considera tutti i file con estensione .pyc, se metto !nomefile considera solo quel file
