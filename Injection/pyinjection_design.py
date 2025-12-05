@@ -3,22 +3,25 @@ pyinjection_design.py
 ---------------------
 Design tool for plain-orifice N2O injectors.
 
-Questo script esplora una griglia 3D in:
-  - r/D  (edge radius ratio, raccordo d'ingresso)
-  - D    (diametro orifizio)
+This script explores a 3D design grid in:
+  - r/D  (edge radius ratio, inlet corner rounding)
+  - D    (orifice diameter)
   - L/D  (length-to-diameter ratio)
 
-Per ciascun punto:
-  - stima un Cd = f(r/D, L/D, Re) coerente con la ricerca svolta
-    (correlazione geometrica semplificata basata su letteratura e dataset
-     interni per orifizi corti N2O/CO2)
-  - calcola la portata per foro usando il backend 0D phase-aware (SPI / NHNE)
-    implementato in pyinjection_core / V5
-  - ricostruisce lo stato a valle tramite HEM + bilancio energetico
-  - valuta la portata totale per Nh fori e il relativo errore rispetto al target.
+For each grid point, it:
+  - estimates a discharge coefficient Cd = f(r/D, L/D, Re) consistent with
+    the dedicated research work
+    (simplified geometry-based correlation derived from literature and
+     internal datasets for short N2O/CO2 orifices)
+  - computes the per-hole mass flow rate using the 0D phase-aware backend
+    (SPI / NHNE) implemented in pyinjection_core / V5
+  - reconstructs the downstream state via HEM + energy balance
+  - evaluates the total mass flow rate for Nh holes and the corresponding
+    error with respect to the target value.
 """
-# Il modello di Cd(r/D, L/D, Re) è implementato in pyinjection_core.estimate_Cd_geom
-# e usato tramite estimate_Cd_from_geometry(...).
+
+# The Cd(r/D, L/D, Re) model is implemented in pyinjection_core.estimate_Cd_geom
+# and used through the high-level helper estimate_Cd_from_geometry(...).
 
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-# ================== IMPORT BASE ==================
+# ================== BASE IMPORTS ==================
 import math
 import argparse
 from dataclasses import dataclass
@@ -36,13 +39,13 @@ import mplcursors
 import numpy as np
 import multiprocessing
 
-# ================== BACKEND 0D (V5 / CORE) ==================
+# ================== 0D BACKEND (V5 / CORE) ==================
 try:
-    # Backend termodinamico + portate dalla versione V5
+    # Thermodynamic backend + mass-flow models from V5
     from pyinjection_core import (
-    compute_mdot_phaseaware,
-    nhne_out_state_from_mdot,
-    estimate_Cd_from_geometry,  # nuovo helper high-level dal core
+        compute_mdot_phaseaware,
+        nhne_out_state_from_mdot,
+        estimate_Cd_from_geometry,  # new high-level helper from the core
     )
 
     HAS_PHASEAWARE = True
@@ -60,44 +63,45 @@ try:
         L_over_D: float | None = None,
     ):
         """
-        Wrapper verso il backend V5: calcola mdot phase-aware e stato in uscita.
+        Wrapper around the V5 backend: compute phase-aware mass flow and outlet state.
 
-        Parametri
-        ---------
+        Parameters
+        ----------
         fluid : str
-            Nome CoolProp del fluido (es. 'NitrousOxide').
+            CoolProp fluid name (e.g. 'NitrousOxide').
         p1, p2 : float
-            Pressioni a monte e valle [Pa].
+            Upstream and downstream pressures [Pa].
         T_line : float
-            Temperatura linea a monte [K].
+            Upstream line temperature [K].
         D : float
-            Diametro dell'orifizio [m].
+            Orifice diameter [m].
         Cd : float
-            Coefficiente di scarico [-].
+            Discharge coefficient [-].
         use_spi_compress : bool
-            Usa SPI compressibile.
+            If True, use compressible SPI.
         spi_n : float | None
-            Esponente politropico per SPI compressibile; se None usa il default del backend.
+            Polytropic exponent for compressible SPI. If None, use backend default.
         L_over_D : float | None
-            Rapporto L/D del foro. Se fornito, viene convertito in L = D * L_over_D.
+            Orifice length-to-diameter ratio. If provided, it is converted to
+            an absolute length L = D * L_over_D.
 
-        Ritorna
+        Returns
         -------
         mdot_per_hole : float
-            Portata per singolo foro [kg/s].
+            Mass flow rate per single hole [kg/s].
         model_used : str
-            'SPI' oppure 'NHNE' (modello scelto dal phase-aware).
+            'SPI' or 'NHNE' (model chosen by the phase-aware logic).
         info : dict
-            Dizionario con info di uscita (fase, densità, Re, Mach, ecc.).
+            Dictionary with outlet information (phase, density, Re, Mach, etc.).
         """
-        # Conversione pressioni Pa → bar per il backend V5
+        # Pressures: Pa → bar for the V5 backend
         p1_bar = p1 / 1e5
         p2_bar = p2 / 1e5
 
-        # Lunghezza assoluta se disponibile
+        # Absolute length if available
         L = D * L_over_D if L_over_D is not None else None
 
-        # 1) Portata phase-aware (SPI o NHNE) dal core V5
+        # 1) Phase-aware mass flow (SPI or NHNE) from the V5 core
         mdot_phase, model_used = compute_mdot_phaseaware(
             fluid=fluid,
             p1_bar=p1_bar,
@@ -111,7 +115,7 @@ try:
             K_RESIDENCE=0.0,
         )
 
-        # 2) Stato di uscita coerente (equilibrio HEM + bilancio energia)
+        # 2) Consistent outlet state (HEM equilibrium + energy balance)
         out = nhne_out_state_from_mdot(
             fluid=fluid,
             p1=p1,
@@ -122,7 +126,7 @@ try:
             h1_hint=None,
         )
 
-        # 3) Info per il design
+        # 3) Info returned to the design side
         info = dict(
             phase_from_spi=out.get("phase_out", "unknown"),
             rho_out_spi=out.get("rho_mix", None),
@@ -143,13 +147,13 @@ except ImportError as e:
     import traceback
     traceback.print_exc()
     raise ImportError(
-        "Impossibile importare 'compute_mdot_phaseaware' / 'nhne_out_state_from_mdot' "
-        "da pyinjection_core.py.\n"
-        "Assicurati che pyinjection_core.py sia nello stesso folder o nel PYTHONPATH."
+        "Unable to import 'compute_mdot_phaseaware' / 'nhne_out_state_from_mdot' "
+        "from pyinjection_core.py.\n"
+        "Make sure that pyinjection_core.py is in the same folder or in the PYTHONPATH."
     ) from e
 
 
-# ================== EVALUAZIONE DI UN CANDIDATO ==================
+# ================== SINGLE CANDIDATE EVALUATION ==================
 @dataclass
 class CandidateResult:
     D: float
@@ -164,6 +168,7 @@ class CandidateResult:
     rho_l: float
     mu_l: float
     note: str = ""
+
 
 def _auto_n_workers(n_workers: int | None) -> int:
     """
@@ -214,6 +219,7 @@ def _auto_n_workers(n_workers: int | None) -> int:
 
     return min(nw, max_hw)
 
+
 def evaluate_candidate(
     fluid: str,
     p1_bar: float,
@@ -244,7 +250,7 @@ def evaluate_candidate(
     p1_bar, p2_bar : float
         Upstream and downstream pressures [bar].
     T_line : float
-        Feeding line temperature [K].
+        Feeding-line temperature [K].
     mdot_target : float
         TOTAL target mass flow [kg/s].
     nholes : int
@@ -258,11 +264,11 @@ def evaluate_candidate(
     D_pipe : float
         Upstream manifold diameter [m].
     Cd_fixed : Optional[float]
-        If provided (>0), overrides Cd (e.g. from CFD/experiments).
+        If provided (>0), overrides Cd (e.g. CFD/experimental value).
     use_spi_compress : bool
-        Enable/disable SPI compressible correction.
+        Enable/disable compressible SPI correction.
     spi_n : float | None
-        Isentropic exponent for SPI compressible correction.
+        Isentropic exponent for compressible SPI.
 
     Returns
     -------
@@ -331,11 +337,13 @@ def evaluate_candidate(
         note=f"model={model_used}, phase_out={phase_out}, Re_char={Re_char:.3e}",
     )
 
+
 def _eval_candidate_wrapper(args_tuple):
-    """Wrapper per parallelizzazione (ProcessPoolExecutor)."""
+    """Wrapper for parallel evaluation (ProcessPoolExecutor)."""
     return evaluate_candidate(*args_tuple)
 
-# ================== LOOP DI DESIGN SU GRIGLIA 3D ==================
+
+# ================== DESIGN LOOP ON 3D GRID ==================
 def design_from_mdot(
     fluid: str,
     p1_bar: float,
@@ -380,7 +388,7 @@ def design_from_mdot(
     n_workers : int
         Number of worker processes for parallel evaluation.
     Cd_fixed : Optional[float]
-        If not None, Cd is fixed to this value (bypass geometry model).
+        If not None, Cd is fixed to this value (bypassing the geometry model).
     use_spi_compress : bool
         Enable/disable SPI compressible correction in the backend.
     spi_n : float | None
@@ -426,7 +434,7 @@ def design_from_mdot(
             try:
                 res = _eval_candidate_wrapper(params)
             except Exception as e:
-                # fallback "empty" result with error note
+                # Fallback "empty" result with error note
                 res = CandidateResult(
                     D=params[7],
                     L=params[8],
@@ -468,8 +476,9 @@ def design_from_mdot(
                 results.append(res)
     return results
 
+
 def _rel_err(res: CandidateResult, mdot_target: float) -> float:
-    """Errore relativo (0–1) su mdot_total, oppure inf se non definito."""
+    """Relative error (0–1) on mdot_total, or inf if not defined."""
     if mdot_target <= 0.0 or res.mdot_total <= 0.0:
         return float("inf")
     return abs(res.mdot_total - mdot_target) / mdot_target
@@ -479,11 +488,11 @@ def select_best_candidates(results: List[CandidateResult],
                            mdot_target: float,
                            topk: int = 10) -> List[CandidateResult]:
     """
-    Ordina i candidati per errore relativo sulla mdot totale
-    e restituisce i migliori topk.
+    Sort candidates by relative error on total mass flow
+    and return the best `topk` ones.
     """
     if mdot_target <= 0.0:
-        raise ValueError("mdot_target deve essere > 0.")
+        raise ValueError("mdot_target must be > 0.")
 
     results_sorted = sorted(results, key=lambda r: _rel_err(r, mdot_target))
     return results_sorted[:topk]
@@ -493,7 +502,7 @@ def get_feasible_candidates(results: List[CandidateResult],
                             mdot_target: float,
                             tol_rel_perc: float) -> List[CandidateResult]:
     """
-    Restituisce tutti i candidati che soddisfano:
+    Return all candidates that satisfy:
         |mdot - mdot_target| / mdot_target <= tol_rel_perc/100.
     """
     if mdot_target <= 0.0:
@@ -504,7 +513,7 @@ def get_feasible_candidates(results: List[CandidateResult],
     return sorted(feas, key=lambda r: _rel_err(r, mdot_target))
 
 
-# ================== PLOT RISULTATI ==================
+# ================== PLOTTING FUNCTIONS ==================
 def plot_cd_vs_ratio_by_diameter(
     results: List[CandidateResult],
     mdot_target: float,
@@ -512,10 +521,10 @@ def plot_cd_vs_ratio_by_diameter(
     ax=None,
 ) -> None:
     """
-    Grafico 'in stile fronte di Pareto' per i soli candidati che soddisfano
-    il requisito di portata entro una certa tolleranza.
+    Pareto-like plot for candidates that satisfy the mass-flow requirement
+    within a given tolerance.
 
-    Ogni punto mostra un tooltip interattivo con:
+    Each point shows an interactive tooltip with:
         - L/D
         - r/D
         - Re
@@ -523,24 +532,24 @@ def plot_cd_vs_ratio_by_diameter(
         - mdot_ratio
         - D
 
-    Se `ax` è None viene creata una nuova figura (comportamento originale).
-    Se `ax` è fornito, il grafico viene disegnato su quell'Axes senza aprire
-    una nuova finestra.
+    If `ax` is None a new figure is created (original behaviour).
+    If `ax` is provided, the plot is drawn on that Axes without opening
+    a new window.
     """
     if mdot_target <= 0.0:
-        print("plot_cd_vs_ratio_by_diameter: mdot_target <= 0, salto il plot.")
+        print("plot_cd_vs_ratio_by_diameter: mdot_target <= 0, skipping plot.")
         return
 
-    # Seleziona i candidati che rispettano il vincolo sulla portata
+    # Select candidates that satisfy the mass-flow constraint
     feas = get_feasible_candidates(results, mdot_target, tol_rel_perc)
     if not feas:
-        print("plot_cd_vs_ratio_by_diameter: nessun candidato entro la tolleranza, nessun grafico.")
+        print("plot_cd_vs_ratio_by_diameter: no candidate within tolerance, no plot generated.")
         return
 
     try:
         import matplotlib.pyplot as plt
     except ImportError:
-        print("matplotlib non disponibile, nessun grafico generato.")
+        print("matplotlib not available, no plot generated.")
         return
 
     created_fig = False
@@ -548,12 +557,12 @@ def plot_cd_vs_ratio_by_diameter(
         fig, ax = plt.subplots()
         created_fig = True
 
-    # Diametri distinti (in m)
+    # Distinct diameters (in m)
     unique_D = sorted({round(c.D, 9) for c in feas})
 
     cmap = plt.cm.get_cmap("tab10")
 
-    # Per salvare info dei punti
+    # For storing per-point info
     scatter_plots = []
 
     for idx, D in enumerate(unique_D):
@@ -569,22 +578,22 @@ def plot_cd_vs_ratio_by_diameter(
 
         sc = ax.scatter(x_cd, y_ratio, marker="o", alpha=0.8, label=label, color=color)
 
-        # Salviamo i dati associati a ogni singolo punto
+        # Store data associated with each point
         sc._candidate_info = group
         scatter_plots.append(sc)
 
-    # Linea target
+    # Target line
     ax.axhline(1.0, linestyle="--", linewidth=1.0)
 
     ax.set_xlabel("Cd [-]")
     ax.set_ylabel("mdot_total / mdot_target [-]")
-    ax.set_title(f"Configurazioni entro {tol_rel_perc:.3f}% sulla portata target")
+    ax.set_title(f"Configurations within {tol_rel_perc:.3f}% of the target mass flow")
 
     ax.grid(True, linestyle=":", linewidth=0.5)
     ax.legend(loc="best", fontsize="small")
 
     # -------------------------
-    #  TOOLTIP INTERATTIVO
+    #  INTERACTIVE TOOLTIP
     # -------------------------
     cursor = mplcursors.cursor(scatter_plots, hover=True)
 
@@ -603,7 +612,7 @@ def plot_cd_vs_ratio_by_diameter(
             f"mdot_ratio = {cand.mdot_total / mdot_target:.4f}"
         )
         sel.annotation.set_text(text)
-        # Sfondo bianco (non più giallo)
+        # White background (no longer yellow)
         bbox = sel.annotation.get_bbox_patch()
         bbox.set(fc="white", ec="black", alpha=0.9)
 
@@ -611,11 +620,12 @@ def plot_cd_vs_ratio_by_diameter(
         import matplotlib.pyplot as plt
         plt.show()
 
-# ================== STAMPA RISULTATI ==================
+
+# ================== TEXT OUTPUT ==================
 def print_candidate_table(cands: List[CandidateResult], mdot_target: float) -> None:
-    """Stampa una tabella compatta dei candidati selezionati."""
+    """Print a compact table of the selected candidates."""
     if not cands:
-        print("(nessun candidato)")
+        print("(no candidate)")
         return
 
     print(
@@ -644,8 +654,9 @@ def print_candidate_table(cands: List[CandidateResult], mdot_target: float) -> N
 
     print("-" * 118)
 
+
 def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
-    """Stampa una piccola tabella riassuntiva per il miglior candidato globale."""
+    """Print a small summary table for the global best candidate."""
     if mdot_target > 0.0:
         err = abs(c.mdot_total - mdot_target) / mdot_target * 100.0
     else:
@@ -666,18 +677,19 @@ def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
     print(f"note       : {c.note}")
     print("============================================\n")
 
+
 def run_gui():
     """
     Tkinter GUI for injector design.
 
-    - Finestra di input (Tkinter) con tutti i parametri e i ToolTip.
-    - Alla pressione di "Run design":
-        * esegue design_from_mdot(...)
-        * apre una finestra matplotlib con:
-              - tabella INPUT (sinistra)
-              - tabella BEST CANDIDATES (destra)
-        * chiama plot_cd_vs_ratio_by_diameter(...) che genera il grafico
-          in basso a destra.
+    - Input window (Tkinter) with all parameters and ToolTips.
+    - When the user presses "Run design":
+        * run design_from_mdot(...)
+        * open a matplotlib window with:
+              - INPUT table (top-left)
+              - BEST CANDIDATES table (top-right)
+        * call plot_cd_vs_ratio_by_diameter(...) to generate the plot
+          in the bottom-right corner.
     """
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -720,8 +732,8 @@ def run_gui():
             if tw is not None:
                 tw.destroy()
 
-        # -----------------------------------------------------
-    #  Output figure con tabelle + grafico
+    # -----------------------------------------------------
+    #  Output figure with tables + plot
     # -----------------------------------------------------
     def show_output_window(_root,
                            input_params: dict[str, str],
@@ -730,20 +742,20 @@ def run_gui():
                            tol_rel_perc: float,
                            results_all: List[CandidateResult]) -> None:
         """
-        Crea una figura matplotlib con:
+        Create a matplotlib figure with:
 
-          - tabella INPUT (in alto a sinistra)
-          - tabella BEST CANDIDATES (in alto a destra)
-          - grafico Cd vs mdot_total/mdot_target (in basso a destra).
+          - INPUT table (top-left)
+          - BEST CANDIDATES table (top-right)
+          - Cd vs mdot_total/mdot_target plot (bottom-right).
 
-        Le dimensioni di font e scale delle tabelle vengono adattate
-        automaticamente in base a numero di righe/colonne, per usare
-        al meglio lo spazio disponibile.
+        Font sizes and table scales are adapted automatically based on
+        the number of rows/columns, to make the best use of the
+        available space.
         """
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
 
-        # ----------- Tabella INPUT ----------- 
+        # ----------- INPUT table -----------
         ordered_keys = [
             "Fluid",
             "P1 [bar]",
@@ -770,8 +782,8 @@ def run_gui():
 
         def format_input_value(raw: str) -> str:
             """
-            Porta il valore a ~3 cifre decimali (fisso o scientifico).
-            Se non è numerico, restituisce la stringa originale.
+            Format input values to ~3 decimal digits (fixed or scientific).
+            If it is not numeric, return the original string.
             """
             s = raw.strip()
             try:
@@ -795,7 +807,7 @@ def run_gui():
                 raw_val = input_params[k]
                 data_input.append([k, format_input_value(raw_val)])
 
-        # ----------- Tabella BEST CANDIDATES ----------- 
+        # ----------- BEST CANDIDATES table -----------
         metric_labels = [
             "#",
             "D [mm]",
@@ -813,7 +825,7 @@ def run_gui():
         ]
 
         def format_best_value(label: str, val: float) -> str:
-            """Formattazione numerica per la tabella best."""
+            """Numeric formatting for the best-candidates table."""
             if not isinstance(val, (int, float)) or not math.isfinite(val):
                 return "NaN"
             if label == "Re [-]":
@@ -868,15 +880,15 @@ def run_gui():
                 row.append(sval)
             data_best.append(row)
 
-                # ----------- Figura: 2 righe x 2 colonne ----------- 
+        # ----------- Figure: 2 rows x 2 columns -----------
         fig_w = 14.0
         fig_h = 9.0
 
         fig = plt.figure(figsize=(fig_w, fig_h))
         fig.canvas.manager.set_window_title("PyInjection – Design results")
 
-        # Colonna sinistra più larga, destra comunque prevalente
-        # (circa 30% / 70% della larghezza totale)
+        # Left column slightly narrower, right column predominant
+        # (about 30% / 70% of total width)
         gs = GridSpec(
             2, 2,
             height_ratios=[0.9, 1.6],
@@ -907,13 +919,13 @@ def run_gui():
             pad=8,
         )
 
-        # --- parametri per adattività ---
+        # --- adaptive parameters ---
         n_rows_input = len(data_input)
         n_cols_input = len(data_input[0]) if data_input else 2
         n_rows_best  = len(data_best)
         n_cols_best  = len(data_best[0]) if data_best else len(metric_labels)
 
-        # Font size input: più righe → font leggermente più piccolo
+        # Input font size: more rows → slightly smaller font
         if n_rows_input > 22:
             fs_input = 7
         elif n_rows_input > 17:
@@ -921,18 +933,18 @@ def run_gui():
         else:
             fs_input = 9
 
-        # Font size best: più colonne → font più piccolo
+        # Best table font size: more columns → smaller font
         if n_cols_best > 11:
             fs_best = 8
         else:
             fs_best = 9
 
-        # Scale orizzontale best: molti col → scala più piccola
-        # con limite minimo per non rendere il testo illeggibile
+        # Horizontal scale for best table: many columns → smaller scale,
+        # with a minimum limit to keep text readable
         scale_x_best = max(0.7, 1.4 - 0.08 * (n_cols_best - 8))
         scale_y_best = 1.8
 
-        # Tabella input: ora più larga (scala_x > 1)
+        # Input table: now slightly wider (scale_x > 1)
         tab_input = ax_input.table(
             cellText=data_input,
             loc="upper center",
@@ -940,14 +952,14 @@ def run_gui():
         )
         tab_input.auto_set_font_size(False)
         tab_input.set_fontsize(fs_input)
-        tab_input.scale(1.2, 1.8)   # più larga rispetto a prima
+        tab_input.scale(1.2, 1.8)   # wider than before
 
         for (row, col), cell in tab_input.get_celld().items():
             if row == 0:
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
-        # Tabella best candidates (con scale adattive)
+        # Best candidates table (with adaptive scales)
         tab_best = ax_best.table(
             cellText=data_best,
             loc="upper center",
@@ -962,13 +974,13 @@ def run_gui():
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
-        # larghezze adattive per sfruttare lo spazio dell’asse destro
+        # Adaptive column widths to better use the right-hand axis space
         try:
             tab_best.auto_set_column_width(list(range(n_cols_best)))
         except Exception:
             pass
 
-        # Grafico
+        # Plot
         ax_plot.clear()
         plot_cd_vs_ratio_by_diameter(
             results_all,
@@ -981,7 +993,6 @@ def run_gui():
         fig.tight_layout()
 
         plt.show(block=False)
-
 
     # -----------------------------
     #  MAIN INPUT WINDOW (Tk)
@@ -1135,12 +1146,12 @@ def run_gui():
             messagebox.showerror("Input error", f"Invalid numeric value:\n{e}")
             return
 
-        # Conversione mm -> m
+        # mm → m conversion
         D_min   = Dmin_mm  * 1e-3
         D_max   = Dmax_mm  * 1e-3
         D_pipe  = Dpipe_mm * 1e-3
 
-        # Esecuzione design
+        # Run design
         try:
             results = design_from_mdot(
                 fluid=fluid,
@@ -1186,7 +1197,7 @@ def run_gui():
                 "showing global best candidates."
             )
 
-        # Dizionario parametri di input per la tabella
+        # Dictionary of input parameters for the table
         input_params = {
             "Fluid": fluid,
             "P1 [bar]": f"{p1_bar:.3f}",
@@ -1221,6 +1232,7 @@ def run_gui():
 
     main_frame.columnconfigure(1, weight=1)
     root.mainloop()
+
 
 # ================== MAIN / CLI ==================
 def main():
@@ -1402,10 +1414,11 @@ def main():
     if not args.no_plot:
         plot_cd_vs_ratio_by_diameter(results, mdot_target, tol_rel_perc)
 
+
 if __name__ == "__main__":
     import sys
 
-    # Se l'utente lancia il file SENZA argomenti => apri direttamente la GUI
+    # If the user runs the file with NO command-line arguments => open the GUI directly
     if len(sys.argv) == 1:
         run_gui()
     else:
