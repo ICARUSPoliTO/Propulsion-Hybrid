@@ -167,6 +167,30 @@ class CandidateResult:
 
 def _auto_n_workers(n_workers: int | None) -> int:
     """
+    Return an effective number of worker processes based on the available CPU cores.
+
+    - If n_workers is None or <= 0 → use (cpu_count - 1), at least 1.
+    - Otherwise clamp n_workers to at most (cpu_count - 1).
+    """
+    try:
+        max_hw = max(1, multiprocessing.cpu_count() - 1)
+    except Exception:
+        max_hw = 1
+
+    if n_workers is None:
+        return max_hw
+
+    try:
+        nw = int(n_workers)
+    except Exception:
+        return max_hw
+
+    if nw <= 0:
+        return max_hw
+
+    return min(nw, max_hw)
+
+    """
     Return an effective number of worker threads based on the available CPU cores.
 
     - If n_workers is None or <= 0 → use (cpu_count - 1), at least 1.
@@ -308,9 +332,8 @@ def evaluate_candidate(
     )
 
 def _eval_candidate_wrapper(args_tuple):
-    """Wrapper per parallelizzazione (ThreadPoolExecutor.map)."""
+    """Wrapper per parallelizzazione (ProcessPoolExecutor)."""
     return evaluate_candidate(*args_tuple)
-
 
 # ================== LOOP DI DESIGN SU GRIGLIA 3D ==================
 def design_from_mdot(
@@ -355,7 +378,7 @@ def design_from_mdot(
     D_pipe : float
         Upstream pipe diameter [m] (used for β = D_orif / D_pipe).
     n_workers : int
-        Number of threads for parallel evaluation.
+        Number of worker processes for parallel evaluation.
     Cd_fixed : Optional[float]
         If not None, Cd is fixed to this value (bypass geometry model).
     use_spi_compress : bool
@@ -420,9 +443,9 @@ def design_from_mdot(
                 )
             results.append(res)
     else:
-        # Parallel execution with threads
+        # Parallel execution with processes (use multiple CPU cores)
         import concurrent.futures as cf
-        with cf.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        with cf.ProcessPoolExecutor(max_workers=n_workers) as ex:
             futures = [ex.submit(_eval_candidate_wrapper, p) for p in param_list]
             for p, fut in zip(param_list, futures):
                 try:
@@ -443,7 +466,6 @@ def design_from_mdot(
                         note=f"ERROR: {e}",
                     )
                 results.append(res)
-
     return results
 
 def _rel_err(res: CandidateResult, mdot_target: float) -> float:
@@ -482,7 +504,6 @@ def get_feasible_candidates(results: List[CandidateResult],
     return sorted(feas, key=lambda r: _rel_err(r, mdot_target))
 
 
-# ================== PLOT 3D RISULTATI ==================
 # ================== PLOT RISULTATI ==================
 def plot_cd_vs_ratio_by_diameter(
     results: List[CandidateResult],
