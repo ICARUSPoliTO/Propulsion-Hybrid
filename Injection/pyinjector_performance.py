@@ -84,14 +84,34 @@ def estimate_Cd_from_geometry_perf(
     D: float,
     L: float,
     r_over_D: float,
+    D_pipe: float | None = None,
 ) -> tuple[float, float]:
     """
-    Local wrapper to use estimate_Cd_from_geometry from the core
-    without asking the user for D_pipe and mdot_target.
+    Local wrapper to use estimate_Cd_from_geometry from the core.
 
-    - p1_bar, p2_bar in [bar]
-    - Assumes D_pipe = D (single orifice on equivalent pipe)
-    - mdot_target estimated with ideal orifice (Cd≈1) to build Re.
+    Parameters
+    ----------
+    fluid : str
+        Fluid name (CoolProp).
+    p1_bar, p2_bar : float
+        Inlet and outlet pressures [bar].
+    T_line : float
+        Feeding line temperature [K].
+    D : float
+        Orifice diameter (per hole) [m].
+    L : float
+        Orifice length (per hole) [m].
+    r_over_D : float
+        Edge radius ratio r/D [-].
+    D_pipe : float, optional
+        Upstream pipe diameter [m]. If None, D_pipe is assumed equal to D.
+
+    Returns
+    -------
+    Cd_used : float
+        Geometric Cd used by the core.
+    Re_char : float
+        Characteristic Reynolds number used in the correlation.
     """
     p1 = p1_bar * 1e5
     p2 = p2_bar * 1e5
@@ -108,8 +128,11 @@ def estimate_Cd_from_geometry_perf(
     # "Target" ideal mass flow (Cd=1, incompressible orifice)
     mdot_target = rho_out * A * math.sqrt(2.0 * dp / max(rho_out, 1e-12))
 
-    # Upstream pipe diameter: assumed equal to orifice
-    D_pipe = D
+    # Upstream pipe diameter: if not provided, assume equal to orifice
+    if D_pipe is None or D_pipe <= 0.0:
+        D_pipe_used = D
+    else:
+        D_pipe_used = D_pipe
 
     # Call to the core function
     Cd_used, Re_char, _, _ = estimate_Cd_from_geometry(
@@ -119,14 +142,13 @@ def estimate_Cd_from_geometry_perf(
         D_orif=D,
         L=L,
         r_over_D=r_over_D,
-        D_pipe=D_pipe,
+        D_pipe=D_pipe_used,
         mdot_target=mdot_target,
         # Cd_input=None => actually use geometric+Darcy model
         Cd_input=None,
     )
 
     return Cd_used, Re_char
-
 
 # ============================================================
 #  TABLE PRINTING UTILITIES (console)
@@ -457,7 +479,8 @@ def run_performance_case(fluid: str = "NitrousOxide",
                          r_over_D: float = 0.05,
                          use_spi_comp: bool = True,
                          spi_n: float = None,
-                         keep_area: bool = False) -> None:
+                         keep_area: bool = False,
+                         D_pipe: float | None = None) -> None:
     """
     Run a single performance case with the given parameters.
 
@@ -466,11 +489,21 @@ def run_performance_case(fluid: str = "NitrousOxide",
     All mass flow rates reported in tables are TOTAL (sum over the Nh holes).
     Outlet properties are per hole.
 
+    D_pipe:
+        Upstream pipe diameter [m]. Used only if Cd_mode == 'geom'.
+        If None or <= 0, D_pipe is assumed equal to D (backward compatible).
+
     keep_area:
         True  -> in the input table the option "Keep A_tot const (Nh)" is ON
         False -> OFF.
     """
     Nh = max(int(Nh), 1)
+
+    # Effective pipe diameter (for non-GUI calls we fall back to D)
+    if D_pipe is None or D_pipe <= 0.0:
+        D_pipe_eff = D
+    else:
+        D_pipe_eff = D_pipe
 
     # ----- Cd determination -----
     if Cd_mode == "geom":
@@ -482,14 +515,18 @@ def run_performance_case(fluid: str = "NitrousOxide",
             D=D,
             L=L,
             r_over_D=r_over_D,
+            D_pipe=D_pipe_eff,
         )
         Cd = Cd_geom
-        Cd_source = f"estimated from geometry (r/D={r_over_D:.3f}, Re≈{Re_ref:.2e})"
+        Cd_source = (
+            f"estimated from geometry (r/D={r_over_D:.3f}, "
+            f"D_pipe={D_pipe_eff:.3e} m, Re≈{Re_ref:.2e})"
+        )
     else:
         Cd_source = "user-provided Cd"
         Re_ref = None  # optional
 
-        # ---- 2) SPI / HEM / NHNE + phase-aware mass flow rates (per hole) ----
+    # ---- 2) SPI / HEM / NHNE + phase-aware mass flow rates (per hole) ----
     mdot_spi_one = _mdot_spi(
         fluid, p1_bar, p2_bar, T_line, D, Cd,
         use_compress=use_spi_comp, n_isentropic=spi_n
@@ -546,6 +583,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         L=L,
         r_over_D=r_over_D,
         Nh=Nh,
+        D_pipe=D_pipe_eff,
         Cd=Cd,
         Cd_mode=Cd_mode,
         Cd_source=Cd_source,
@@ -560,7 +598,6 @@ def run_performance_case(fluid: str = "NitrousOxide",
         keep_area=keep_area,
     )
 
-
 def show_output_tables_gui(fluid: str,
                            p1_bar: float,
                            p2_bar: float,
@@ -569,6 +606,7 @@ def show_output_tables_gui(fluid: str,
                            L: float,
                            r_over_D: float,
                            Nh: int,
+                           D_pipe: float,
                            Cd: float,
                            Cd_mode: str,
                            Cd_source: str,
@@ -595,6 +633,7 @@ def show_output_tables_gui(fluid: str,
 
     Nh = number of identical holes; mdot_* are TOTAL mass flow rates (sum over holes).
     D, L, r_over_D are per-hole geometric parameters.
+    D_pipe is the upstream pipe diameter [m].
     """
     try:
         import matplotlib.pyplot as plt
@@ -764,7 +803,7 @@ def show_output_tables_gui(fluid: str,
     from matplotlib.gridspec import GridSpec
     import math as _math
 
-    # --- INPUT table (vertical) ---
+        # --- INPUT table (vertical) ---
     if D > 0.0:
         L_over_D_val = L / D
         A_hole = 0.25 * math.pi * D * D
@@ -1099,6 +1138,7 @@ def launch_gui():
 
     D_var        = tk.StringVar(value=f"{D_init:.6f}")       # per-hole diameter
     Dref_var     = tk.StringVar(value=f"{D_ref_init:.6f}")   # equivalent single orifice
+    Dpipe_var    = tk.StringVar(value="0.005000")            # upstream pipe diameter [m]
     L_var        = tk.StringVar(value="0.010")
     r_var        = tk.StringVar(value="0.00010")
     rD_var       = tk.StringVar(value="0.05")
@@ -1360,6 +1400,7 @@ def launch_gui():
 
     d_entry    = add_row("D [m] (per hole)", D_var)              # state changes with checkbox
     dref_entry = add_row("D_ref [m] (equiv. single)", Dref_var)  # idem
+    dpipe_entry = add_row("D_pipe [m]", Dpipe_var) 
     L_entry    = add_row("L [m]", L_var)
 
     # derived
@@ -1392,23 +1433,29 @@ def launch_gui():
         else:
             cd_entry.config(state="normal")
 
-        # L and r: used only for geometric Cd → in "user" mode they are disabled and shown as "-"
+        # L, r, D_pipe: usati solo per Cd geometrico
         if Cd_mode_var.get() == "geom":
             # back to numeric, editable
             if L_var.get().strip() == "-":
                 L_var.set("0.010")
             if r_var.get().strip() == "-":
                 r_var.set("0.00010")
+            if Dpipe_var.get().strip() == "-":
+                Dpipe_var.set("0.005000")
             L_entry.config(state="normal")
             r_entry.config(state="normal")
+            dpipe_entry.config(state="normal")
         else:
-            # user mode: L and r not used → disabled and shown as "-"
+            # user mode: non usati → disabilitati e mostrati come "-"
             L_entry.config(state="readonly")
             r_entry.config(state="readonly")
+            dpipe_entry.config(state="readonly")
             L_var.set("-")
             r_var.set("-")
+            Dpipe_var.set("-")
             L_over_D_var.set("-")
             rD_var.set("-")
+
 
     Cd_mode_var.trace_add("write", _update_cd_entry_state)
     _update_cd_entry_state()
@@ -1549,6 +1596,13 @@ def launch_gui():
         "D (per hole) is computed as D_ref / sqrt(Nh).\n"
         "When unchecked, D is the primary input and D_ref follows."
     )
+    ToolTip(
+        dpipe_entry,
+        "Upstream pipe / manifold diameter D_pipe [m].\n"
+        "Used only when Cd mode is 'geom' to account for\n"
+        "Darcy losses between the feeding pipe and the orifice."
+    )
+
 
     # =========================
     #  Run callback
@@ -1565,18 +1619,30 @@ def launch_gui():
 
             Cd_mode = Cd_mode_var.get()
 
-            # L and r: ONLY if geom, otherwise we do not read them (they are "-")
+            # default value for D_pipe (may be overridden below)
+            D_pipe = None
+
+            # L, r, D_pipe: ONLY if geom, otherwise we do not read them (they can be "-")
             if Cd_mode == "geom":
                 L = float(L_var.get())
                 r = float(r_var.get())
                 r_over_D = r / D if D > 0.0 else float("nan")
                 rD_var.set(f"{r_over_D:.5f}")
+
+                # read D_pipe from GUI; if invalid, fall back to D and fix the entry
+                try:
+                    D_pipe = float(Dpipe_var.get())
+                except ValueError:
+                    D_pipe = D
+                    Dpipe_var.set(f"{D_pipe:.6f}")
             else:
                 # in user mode they are not used by the geometric Cd
                 L = 0.0
                 r = 0.0
                 r_over_D = float("nan")
                 rD_var.set("-")
+                # D_pipe unused in user mode → leave as None
+                D_pipe = None
 
             Cd_in  = float(Cd_var.get())
 
@@ -1590,12 +1656,13 @@ def launch_gui():
             else:
                 spi_n = None
 
-            use_spi_comp = bool(spi_comp_var.get())
+            use_spi_comp   = bool(spi_comp_var.get())
             keep_area_flag = bool(keep_area_var.get())
         except ValueError as e:
             messagebox.showerror("Input error", f"Numeric conversion error:\n{e}")
             return
 
+        # ---- geometric Cd (if requested) ----
         if Cd_mode == "geom":
             try:
                 Cd_geom, Re_ref = estimate_Cd_from_geometry_perf(
@@ -1606,10 +1673,12 @@ def launch_gui():
                     D=D,
                     L=L,
                     r_over_D=r_over_D,
+                    D_pipe=D_pipe,      # <-- usa il valore letto dalla GUI
                 )
                 Cd = Cd_geom
                 Cd_source_str = (
-                    f"estimated from geometry (r/D={r_over_D:.3f}, Re≈{Re_ref:.2e})"
+                    f"estimated from geometry (r/D={r_over_D:.3f}, "
+                    f"D_pipe={D_pipe:.3e} m, Re≈{Re_ref:.2e})"
                 )
             except Exception as exc:
                 messagebox.showerror(
@@ -1640,7 +1709,9 @@ def launch_gui():
             use_spi_comp=use_spi_comp,
             spi_n=spi_n,
             keep_area=keep_area_flag,
+            D_pipe=D_pipe,    # <-- ora esiste e ha il valore corretto
         )
+
 
     btn = ttk.Button(frame, text="Run performance", command=on_run)
     btn.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
