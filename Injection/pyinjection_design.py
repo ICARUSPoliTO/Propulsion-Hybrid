@@ -42,7 +42,7 @@ import multiprocessing
 # ================== 0D BACKEND (V5 / CORE) ==================
 try:
     # Thermodynamic backend + mass-flow models from V5
-    from pyinjection_core import (
+    from PyInjection_core import (
         compute_mdot_phaseaware,
         nhne_out_state_from_mdot,
         estimate_Cd_from_geometry,  # new high-level helper from the core
