@@ -644,7 +644,6 @@ def print_candidate_table(cands: List[CandidateResult], mdot_target: float) -> N
 
     print("-" * 118)
 
-
 def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
     """Stampa una piccola tabella riassuntiva per il miglior candidato globale."""
     if mdot_target > 0.0:
@@ -667,7 +666,6 @@ def print_best_candidate(c: CandidateResult, mdot_target: float) -> None:
     print(f"note       : {c.note}")
     print("============================================\n")
 
-# ================== SEMPLICE INTERFACCIA GRAFICA (Tkinter) ==================
 def run_gui():
     """
     Tkinter GUI for injector design.
@@ -722,7 +720,7 @@ def run_gui():
             if tw is not None:
                 tw.destroy()
 
-    # -----------------------------------------------------
+        # -----------------------------------------------------
     #  Output figure con tabelle + grafico
     # -----------------------------------------------------
     def show_output_window(_root,
@@ -733,10 +731,17 @@ def run_gui():
                            results_all: List[CandidateResult]) -> None:
         """
         Crea una figura matplotlib con:
+
           - tabella INPUT (in alto a sinistra)
           - tabella BEST CANDIDATES (in alto a destra)
           - grafico Cd vs mdot_total/mdot_target (in basso a destra).
+
+        Le dimensioni di font e scale delle tabelle vengono adattate
+        automaticamente in base a numero di righe/colonne, per usare
+        al meglio lo spazio disponibile.
         """
+        import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
 
         # ----------- Tabella INPUT ----------- 
         ordered_keys = [
@@ -799,7 +804,10 @@ def run_gui():
             "r/D [-]",
             "Re [-]",
             "Cd [-]",
+            "A_h [mm^2]",
+            "A_tot [mm^2]",
             "Nh [-]",
+            "mdot_hole [kg/s]",
             "mdot_tot [kg/s]",
             "err_rel [%]",
         ]
@@ -832,8 +840,17 @@ def run_gui():
                     val = c.Re
                 elif label == "Cd [-]":
                     val = c.Cd
+                elif label == "A_h [mm^2]":
+                    D_mm = c.D * 1e3
+                    val = math.pi * (D_mm ** 2) / 4.0
+                elif label == "A_tot [mm^2]":
+                    D_mm = c.D * 1e3
+                    A_h_mm2 = math.pi * (D_mm ** 2) / 4.0
+                    val = A_h_mm2 * c.nh
                 elif label == "Nh [-]":
                     val = c.nh
+                elif label == "mdot_hole [kg/s]":
+                    val = c.mdot_per_hole
                 elif label == "mdot_tot [kg/s]":
                     val = c.mdot_total
                 elif label == "err_rel [%]":
@@ -851,17 +868,19 @@ def run_gui():
                 row.append(sval)
             data_best.append(row)
 
-        # ----------- Figura: 2 righe x 2 colonne ----------- 
+                # ----------- Figura: 2 righe x 2 colonne ----------- 
         fig_w = 14.0
         fig_h = 9.0
 
         fig = plt.figure(figsize=(fig_w, fig_h))
         fig.canvas.manager.set_window_title("PyInjection – Design results")
 
+        # Colonna sinistra più larga, destra comunque prevalente
+        # (circa 30% / 70% della larghezza totale)
         gs = GridSpec(
             2, 2,
             height_ratios=[0.9, 1.6],
-            width_ratios=[1.0, 1.8],
+            width_ratios=[0.9, 2.1],
             figure=fig,
         )
 
@@ -888,39 +907,62 @@ def run_gui():
             pad=8,
         )
 
-        # Tabella input
+        # --- parametri per adattività ---
+        n_rows_input = len(data_input)
+        n_cols_input = len(data_input[0]) if data_input else 2
+        n_rows_best  = len(data_best)
+        n_cols_best  = len(data_best[0]) if data_best else len(metric_labels)
+
+        # Font size input: più righe → font leggermente più piccolo
+        if n_rows_input > 22:
+            fs_input = 7
+        elif n_rows_input > 17:
+            fs_input = 8
+        else:
+            fs_input = 9
+
+        # Font size best: più colonne → font più piccolo
+        if n_cols_best > 11:
+            fs_best = 8
+        else:
+            fs_best = 9
+
+        # Scale orizzontale best: molti col → scala più piccola
+        # con limite minimo per non rendere il testo illeggibile
+        scale_x_best = max(0.7, 1.4 - 0.08 * (n_cols_best - 8))
+        scale_y_best = 1.8
+
+        # Tabella input: ora più larga (scala_x > 1)
         tab_input = ax_input.table(
             cellText=data_input,
             loc="upper center",
             cellLoc="center",
         )
         tab_input.auto_set_font_size(False)
-        tab_input.set_fontsize(9)
-        tab_input.scale(1.3, 1.8)
+        tab_input.set_fontsize(fs_input)
+        tab_input.scale(1.2, 1.8)   # più larga rispetto a prima
 
         for (row, col), cell in tab_input.get_celld().items():
             if row == 0:
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
-        # Tabella best
+        # Tabella best candidates (con scale adattive)
         tab_best = ax_best.table(
             cellText=data_best,
             loc="upper center",
             cellLoc="center",
         )
         tab_best.auto_set_font_size(False)
-        tab_best.set_fontsize(9)
-        tab_best.scale(1.3, 1.8)
-
-        n_rows_best = len(data_best)
-        n_cols_best = len(data_best[0])
+        tab_best.set_fontsize(fs_best)
+        tab_best.scale(scale_x_best, scale_y_best)
 
         for (row, col), cell in tab_best.get_celld().items():
             if row == 0 or col == 0:
                 cell.set_facecolor("#CCCCCC")
                 cell.set_text_props(weight="bold")
 
+        # larghezze adattive per sfruttare lo spazio dell’asse destro
         try:
             tab_best.auto_set_column_width(list(range(n_cols_best)))
         except Exception:
@@ -935,10 +977,11 @@ def run_gui():
             ax=ax_plot,
         )
 
-        gs.update(wspace=0.5, hspace=0.8)
+        gs.update(wspace=0.6, hspace=0.8)
         fig.tight_layout()
 
         plt.show(block=False)
+
 
     # -----------------------------
     #  MAIN INPUT WINDOW (Tk)
