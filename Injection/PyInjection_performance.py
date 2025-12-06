@@ -526,7 +526,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         Cd_source = "user-provided Cd"
         Re_ref = None  # optional
 
-    # ---- 2) SPI / HEM / NHNE + phase-aware mass flow rates (per hole) ----
+    # ----- 1) Mass flows per single hole -----
     mdot_spi_one = _mdot_spi(
         fluid, p1_bar, p2_bar, T_line, D, Cd,
         use_compress=use_spi_comp, n_isentropic=spi_n
@@ -534,8 +534,6 @@ def run_performance_case(fluid: str = "NitrousOxide",
     mdot_hem_one = _mdot_hem(fluid, p1_bar, p2_bar, T_line, D, Cd)
     mdot_nhne_one, _ = _mdot_nhne(
         fluid, p1_bar, p2_bar, T_line, D, Cd,
-        L_over_D=(L / D if D > 0.0 else None),
-        K_RESIDENCE=0.0,
         use_spi_compress=use_spi_comp,
         spi_n=spi_n,
     )
@@ -550,7 +548,6 @@ def run_performance_case(fluid: str = "NitrousOxide",
         L=L,
         use_spi_compress=use_spi_comp,
         spi_n=spi_n,
-        K_RESIDENCE=0.0,
     )
 
     # Total mass flow rates (all holes)
@@ -581,7 +578,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         T_line=T_line,
         D=D,
         L=L,
-        r_over_D=r_over_D,
+        r_over_D=r_over_D,      # <--- AGGIUNGI QUESTA RIGA
         Nh=Nh,
         D_pipe=D_pipe_eff,
         Cd=Cd,
@@ -597,6 +594,7 @@ def run_performance_case(fluid: str = "NitrousOxide",
         model_used=model_used,
         keep_area=keep_area,
     )
+
 
 def show_output_tables_gui(fluid: str,
                            p1_bar: float,

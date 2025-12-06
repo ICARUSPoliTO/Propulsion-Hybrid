@@ -148,28 +148,25 @@ def _k_local(
     p_local: float,
     p2: float,
     T_line: float,
-    L_over_D: Optional[float] = None,
-    K_RESIDENCE: float = 0.0,
 ) -> float:
     """
     Local blending factor k for NHNE:
 
         k = sqrt( (p_local - p2) / max(Psat(T_line) - p2, P_EPS) )
 
-    Optionally damped by L/D via:
+    Slightly filtered if p_local < p2 or beyond saturation,
+    so that k ≥ 0 and continuous.
 
-        k ← k / (1 + K_RESIDENCE * L/D)
-
-    K_RESIDENCE allows reducing k for longer orifices (larger residence time).
+    Note:
+    Any dependence on L/D (residence-time-like corrections) is intentionally
+    not included here, because geometric effects are already captured in the
+    discharge coefficient Cd.
     """
     pV = _safe_psat_at_T(fluid, T_line)
     den = max(pV - p2, P_EPS)
     num = max(p_local - p2, 0.0)
     k = math.sqrt(num / den)
-    if L_over_D and (L_over_D > 0.0) and (K_RESIDENCE > 0.0):
-        k /= (1.0 + K_RESIDENCE * L_over_D)
     return k
-
 
 # ======================================================================
 #                            MASS-FLOW MODELS
@@ -313,8 +310,6 @@ def _mdot_hem(
 
     return mdot
 
-
-
 def _mdot_nhne(
     fluid: str,
     p1_bar: float,
@@ -322,8 +317,6 @@ def _mdot_nhne(
     T_line: float,
     D: float,
     Cd: float,
-    L_over_D: Optional[float] = None,
-    K_RESIDENCE: float = 0.0,
     use_spi_compress: bool = True,
     spi_n: Optional[float] = None,
 ) -> Tuple[float, float]:
@@ -333,6 +326,11 @@ def _mdot_nhne(
         mdot_NHNE = [k/(k+1)] * mdot_SPI + [1/(k+1)] * mdot_HEM
 
     Returns (mdot_nhne, k).
+
+    Note:
+    The local blending factor k depends only on pressure and saturation
+    at T_line. Any residence-time-like dependence on L/D is NOT applied
+    here, as geometric effects are already included in Cd.
     """
     p1, p2 = _pkey(p1_bar * 1e5), _pkey(p2_bar * 1e5)
 
@@ -353,13 +351,10 @@ def _mdot_nhne(
         p_local=p1,
         p2=p2,
         T_line=T_line,
-        L_over_D=L_over_D,
-        K_RESIDENCE=K_RESIDENCE,
     )
 
     mdot_nhne = (k / (k + 1.0)) * mdot_spi + (1.0 / (k + 1.0)) * mdot_hem
     return mdot_nhne, k
-
 
 # ----------------------------------------------------------------------
 # Minimal classifier to decide if SPI produces two-phase outlet
@@ -432,7 +427,6 @@ def compute_mdot_phaseaware(
     L: Optional[float] = None,
     use_spi_compress: bool = True,
     spi_n: Optional[float] = None,
-    K_RESIDENCE: float = 0.0,
 ) -> Tuple[float, str]:
     """
     Phase-aware mass-flow API.
@@ -443,9 +437,13 @@ def compute_mdot_phaseaware(
       - Otherwise → use SPI
 
     model_used is one of {"SPI", "NHNE"}.
+
+    Note:
+    The NHNE blending factor k no longer includes any L/D-based
+    residence-time correction. L is kept only for possible future
+    extensions, while geometric effects are included in Cd.
     """
     p1, p2 = _pkey(p1_bar * 1e5), _pkey(p2_bar * 1e5)
-    L_over_D = (L / D) if (L is not None and D > 0.0) else None
 
     mdot_spi = _mdot_spi(
         fluid,
@@ -464,8 +462,6 @@ def compute_mdot_phaseaware(
         T_line,
         D,
         Cd,
-        L_over_D=L_over_D,
-        K_RESIDENCE=K_RESIDENCE,
         use_spi_compress=use_spi_compress,
         spi_n=spi_n,
     )

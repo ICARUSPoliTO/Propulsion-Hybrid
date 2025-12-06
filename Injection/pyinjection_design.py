@@ -51,96 +51,95 @@ try:
     HAS_PHASEAWARE = True
 
     def solve_mdot_phaseaware(
-        fluid: str,
-        p1: float,
-        p2: float,
-        T_line: float,
-        D: float,
-        Cd: float,
-        *,
-        use_spi_compress: bool = True,
-        spi_n: float | None = None,
-        L_over_D: float | None = None,
-    ):
-        """
-        Wrapper around the V5 backend: compute phase-aware mass flow and outlet state.
+            fluid: str,
+            p1: float,
+            p2: float,
+            T_line: float,
+            D: float,
+            Cd: float,
+            *,
+            use_spi_compress: bool = True,
+            spi_n: float | None = None,
+            L_over_D: float | None = None,
+        ):
+            """
+            Wrapper around the V5 backend: compute phase-aware mass flow and outlet state.
 
-        Parameters
-        ----------
-        fluid : str
-            CoolProp fluid name (e.g. 'NitrousOxide').
-        p1, p2 : float
-            Upstream and downstream pressures [Pa].
-        T_line : float
-            Upstream line temperature [K].
-        D : float
-            Orifice diameter [m].
-        Cd : float
-            Discharge coefficient [-].
-        use_spi_compress : bool
-            If True, use compressible SPI.
-        spi_n : float | None
-            Polytropic exponent for compressible SPI. If None, use backend default.
-        L_over_D : float | None
-            Orifice length-to-diameter ratio. If provided, it is converted to
-            an absolute length L = D * L_over_D.
+            Parameters
+            ----------
+            fluid : str
+                CoolProp fluid name (e.g. 'NitrousOxide').
+            p1, p2 : float
+                Upstream and downstream pressures [Pa].
+            T_line : float
+                Upstream line temperature [K].
+            D : float
+                Orifice diameter [m].
+            Cd : float
+                Discharge coefficient [-].
+            use_spi_compress : bool
+                If True, use compressible SPI.
+            spi_n : float | None
+                Polytropic exponent for compressible SPI. If None, use backend default.
+            L_over_D : float | None
+                Orifice length-to-diameter ratio. If provided, it is converted to
+                an absolute length L = D * L_over_D.
 
-        Returns
-        -------
-        mdot_per_hole : float
-            Mass flow rate per single hole [kg/s].
-        model_used : str
-            'SPI' or 'NHNE' (model chosen by the phase-aware logic).
-        info : dict
-            Dictionary with outlet information (phase, density, Re, Mach, etc.).
-        """
-        # Pressures: Pa → bar for the V5 backend
-        p1_bar = p1 / 1e5
-        p2_bar = p2 / 1e5
+            Returns
+            -------
+            mdot_per_hole : float
+                Mass flow rate per single hole [kg/s].
+            model_used : str
+                'SPI' or 'NHNE' (model chosen by the phase-aware logic).
+            info : dict
+                Dictionary with outlet information (phase, density, Re, Mach, etc.).
+            """
+            # Pressures: Pa → bar for the V5 backend
+            p1_bar = p1 / 1e5
+            p2_bar = p2 / 1e5
 
-        # Absolute length if available
-        L = D * L_over_D if L_over_D is not None else None
+            # Absolute length if available
+            L = D * L_over_D if L_over_D is not None else None
 
-        # 1) Phase-aware mass flow (SPI or NHNE) from the V5 core
-        mdot_phase, model_used = compute_mdot_phaseaware(
-            fluid=fluid,
-            p1_bar=p1_bar,
-            p2_bar=p2_bar,
-            T_line=T_line,
-            D=D,
-            Cd=Cd,
-            L=L,
-            use_spi_compress=use_spi_compress,
-            spi_n=spi_n,
-            K_RESIDENCE=0.0,
-        )
+            # 1) Phase-aware mass flow (SPI or NHNE) from the V5 core
+            mdot_phase, model_used = compute_mdot_phaseaware(
+                fluid=fluid,
+                p1_bar=p1_bar,
+                p2_bar=p2_bar,
+                T_line=T_line,
+                D=D,
+                Cd=Cd,
+                L=L,
+                use_spi_compress=use_spi_compress,
+                spi_n=spi_n,
+            )
 
-        # 2) Consistent outlet state (HEM equilibrium + energy balance)
-        out = nhne_out_state_from_mdot(
-            fluid=fluid,
-            p1=p1,
-            p2=p2,
-            T_line=T_line,
-            D=D,
-            mdot_nhne=mdot_phase,
-            h1_hint=None,
-        )
+            # 2) Consistent outlet state (HEM equilibrium + energy balance)
+            out = nhne_out_state_from_mdot(
+                fluid=fluid,
+                p1=p1,
+                p2=p2,
+                T_line=T_line,
+                D=D,
+                mdot_nhne=mdot_phase,
+                h1_hint=None,
+            )
 
-        # 3) Info returned to the design side
-        info = dict(
-            phase_from_spi=out.get("phase_out", "unknown"),
-            rho_out_spi=out.get("rho_mix", None),
-            T_out=out.get("T_out", None),
-            x_out=out.get("x_out", None),
-            alpha_out=out.get("alpha_out", None),
-            rho_l=out.get("rho_l", None),
-            rho_v=out.get("rho_v", None),
-            mu_mix=out.get("mu_mix", None),
-            Re_out=out.get("Re_out", None),
-            Mach=out.get("Mach", None),
-        )
+            # 3) Info returned to the design side
+            info = dict(
+                phase_from_spi=out.get("phase_out", "unknown"),
+                rho_out_spi=out.get("rho_mix", None),
+                T_out=out.get("T_out", None),
+                x_out=out.get("x_out", None),
+                alpha_out=out.get("alpha_out", None),
+                rho_l=out.get("rho_l", None),
+                rho_v=out.get("rho_v", None),
+                mu_mix=out.get("mu_mix", None),
+                Re_out=out.get("Re_out", None),
+                Mach=out.get("Mach", None),
+            )
 
-        return mdot_phase, model_used, info
+            return mdot_phase, model_used, info
 
 except ImportError as e:
     HAS_PHASEAWARE = False
