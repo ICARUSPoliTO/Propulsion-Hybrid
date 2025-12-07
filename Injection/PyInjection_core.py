@@ -668,7 +668,6 @@ def estimate_T_out_energy(
 
     return T_out, h2, phase
 
-
 def nhne_out_state_from_mdot(
     fluid: str,
     p1: float,
@@ -677,119 +676,120 @@ def nhne_out_state_from_mdot(
     D: float,
     mdot_nhne: float,
     h1_hint: Optional[float] = None,
-    max_iter: int = 10000,
+    max_iter: int = 10000,  # kept for API compatibility, unused in isentropic version
 ) -> Dict[str, Any]:
     """
-    Given a target mass flow mdot (typically the phase-aware one),
-    compute a self-consistent outlet state:
+    Reconstruct outlet state from a given mass flow rate, assuming
+    an isentropic expansion between upstream and downstream:
 
-      - T_out, U_out, Mach, Re
-      - rho_mix, mu_mix
-      - x_out (mass quality), alpha_out (void fraction)
-      - rho_l, rho_v
-      - j_liq, j_gas (superficial phase velocities)
+        s1 = s2
+
+    This is fully consistent with the HEM implementation used for the
+    mass-flow model:
+
+        m_HEM = C_d * A * rho2 * sqrt(2 * (h1 - h2))
+
+    where h1, s1 are computed at (P1, T_line) and h2, rho2 at (P2, s = s1).
+
+    The function returns:
+      - T_out, U_out, Mach, Re_out
+      - rho_mix, mu_mix, a_out
+      - x_out, alpha_out
+      - phase volumetric flow rates and superficial velocities
+      - phase label ('liquid' / 'gas' / 'two-phase')
     """
+
+    # --- Basic geometry and non-negative mdot ---
     A = 0.25 * math.pi * D * D
     mdot = max(mdot_nhne, 0.0)
 
-    # Upstream enthalpy h1
+    # Pressures in Pa (through key normalization)
+    p1 = _pkey(p1)
+    p2 = _pkey(p2)
+
+    # ------------------------------------------------
+    # 1) Upstream stagnation state: h1, s1
+    # ------------------------------------------------
     if h1_hint is not None:
-        h1 = float(h1_hint)
+        # Try to use the provided enthalpy hint at P1
+        try:
+            h1 = float(h1_hint)
+            s1 = cp.PropsSI("S", "P", p1, "H", h1, fluid)
+        except Exception:
+            # Fallback to (P1, T_line)
+            try:
+                h1 = cp.PropsSI("H", "P", p1, "T", T_line, fluid)
+                s1 = cp.PropsSI("S", "P", p1, "T", T_line, fluid)
+            except Exception:
+                # Final fallback: saturated liquid at P1
+                h1 = cp.PropsSI("H", "P", p1, "Q", 0, fluid)
+                s1 = cp.PropsSI("S", "P", p1, "Q", 0, fluid)
     else:
         try:
             h1 = cp.PropsSI("H", "P", p1, "T", T_line, fluid)
+            s1 = cp.PropsSI("S", "P", p1, "T", T_line, fluid)
         except Exception:
+            # Fallback: saturated liquid at P1
             h1 = cp.PropsSI("H", "P", p1, "Q", 0, fluid)
+            s1 = cp.PropsSI("S", "P", p1, "Q", 0, fluid)
 
-    # Initial "liquid" density at outlet
+    # ------------------------------------------------
+    # 2) Isentropic outlet state at (P2, s = s1)
+    # ------------------------------------------------
     try:
-        rho2 = cp.PropsSI("D", "P", p2, "Q", 0, fluid)
+        h2 = cp.PropsSI("H", "P", p2, "S", s1, fluid)
+        T_out = cp.PropsSI("T", "P", p2, "S", s1, fluid)
     except Exception:
-        T_sat_p2 = cp.PropsSI("T", "P", p2, "Q", 1, fluid)
-        rho2 = rho_singlephase_at_T(
-            fluid,
-            p2,
-            max(T_sat_p2 - 0.5, 100.0),
-            side="liq",
-        )
+        # Fallback: isothermal (P2, T_line)
+        T_out = T_line
+        h2 = cp.PropsSI("H", "P", p2, "T", T_out, fluid)
 
-    T_out = T_line
-    rho_l = rho_v = None
-    x = 0.0
-    is_two = False
+    # ------------------------------------------------
+    # 3) Mixture density via HEM at (P2, h2)
+    # ------------------------------------------------
+    rho_mix, rho_l, rho_v, x, is_two = mixture_rho_HEM(fluid, p2, h2)
 
-    for _ in range(max_iter):
-        U_out = mdot / max(rho2 * A, 1e-12)
-        T_out, h2, phase_hint = estimate_T_out_energy(
-            fluid,
-            p1,
-            T_line,
-            p2,
-            U_out=U_out,
-            U_in=0.0,
-        )
-
-        rho_mix, rho_l, rho_v, x, is_two = mixture_rho_HEM(fluid, p2, h2)
-
-        if rho_mix is None:
-            # Single-phase fallback
-            try:
-                T_sat = cp.PropsSI("T", "P", p2, "Q", 1, fluid)
-            except Exception:
-                T_sat = T_out
-
-            if T_out > T_sat + 0.5:
-                rho_mix = rho_singlephase_at_T(
-                    fluid,
-                    p2,
-                    T_out,
-                    side="gas",
-                )
-                x, is_two = 1.0, False
-            else:
-                rho_mix = rho_singlephase_at_T(
-                    fluid,
-                    p2,
-                    T_out,
-                    side="liq",
-                )
-                x, is_two = 0.0, False
-
-        # Density convergence
-        if abs(rho_mix - rho2) <= 1e-3 * max(rho2, 1.0):
-            rho2 = rho_mix
-            break
-
-        rho2 = rho_mix
-
-    # Mixture viscosity
-    if is_two:
-        mu_l = _safe_viscosity(fluid, p2, phase="liq")
-        mu_g = _safe_viscosity(fluid, p2, T_out, phase="gas")
-        mu_mix = (1.0 - x) * mu_l + x * mu_g
-    else:
-        try:
-            T_sat = cp.PropsSI("T", "P", p2, "Q", 1, fluid)
-        except Exception:
-            T_sat = T_out
-        phase_single = "gas" if T_out > T_sat + 0.5 else "liq"
-        mu_mix = _safe_viscosity(fluid, p2, T_out, phase=phase_single)
-
-    # Void fraction alpha
-    if is_two and (rho_l is not None) and (rho_v is not None):
-        Vv = x / max(rho_v, 1e-12)
-        Vl = (1.0 - x) / max(rho_l, 1e-12)
-        alpha_out = Vv / max(Vv + Vl, 1e-12)
-    else:
-        alpha_out = float(x >= 0.999)
-
-    # Velocities and dimensionless numbers
-    U_out = mdot / max(rho2 * A, 1e-12)
+    # Tsat at P2 for phase labelling and fallbacks
     try:
         T_sat_p2 = cp.PropsSI("T", "P", p2, "Q", 1, fluid)
     except Exception:
         T_sat_p2 = T_out
 
+    # If HEM mixture fails, interpret state as single-phase
+    if (rho_mix is None) or (rho_mix <= 0.0):
+        if T_out > (T_sat_p2 + 0.5):
+            # Gas branch
+            rho2 = rho_singlephase_at_T(fluid, p2, T_out, side="gas")
+            x = 1.0
+            is_two = False
+        else:
+            # Liquid branch
+            rho2 = rho_singlephase_at_T(fluid, p2, T_out, side="liq")
+            x = 0.0
+            is_two = False
+    else:
+        rho2 = rho_mix
+
+    # Clamp x in [0,1]
+    x = float(min(max(x, 0.0), 1.0))
+
+    # ------------------------------------------------
+    # 4) Outlet kinematics (U_out, Re, Mach)
+    # ------------------------------------------------
+    U_out = mdot / max(rho2 * A, 1e-12)
+
+    # Mixture viscosity:
+    #  - two-phase: simple HEM-like linear blend
+    #  - single-phase: gas or liquid branch
+    if is_two and (0.0 < x < 1.0) and (rho_l is not None) and (rho_v is not None):
+        mu_l = _safe_viscosity(fluid, p2, T_out, phase="liq")
+        mu_g = _safe_viscosity(fluid, p2, T_out, phase="gas")
+        mu_mix = (1.0 - x) * mu_l + x * mu_g
+    else:
+        phase = "gas" if x >= 0.999 else "liq"
+        mu_mix = _safe_viscosity(fluid, p2, T_out, phase=phase)
+
+    # Speed of sound
     a_out = _safe_speed_of_sound(
         fluid,
         p2,
@@ -799,39 +799,61 @@ def nhne_out_state_from_mdot(
         rho_l=rho_l,
         rho_v=rho_v,
     )
+
     Mach = U_out / max(a_out, 1e-9)
     Re = rho2 * U_out * D / max(mu_mix, 1e-12)
 
-    # Phase volumetric flow rates
+    # ------------------------------------------------
+    # 5) Phase volumetric flow rates and superficial velocities
+    # ------------------------------------------------
     Vdot = mdot / max(rho2, 1e-12)
-    if is_two and (rho_l is not None) and (rho_v is not None):
+
+    if is_two and (rho_l is not None) and (rho_v is not None) and (0.0 < x < 1.0):
         Vdot_v = x * mdot / max(rho_v, 1e-12)
         Vdot_l = (1.0 - x) * mdot / max(rho_l, 1e-12)
     else:
-        if x >= 0.999:     # effectively all gas
+        if x >= 0.999:  # effectively all gas
             Vdot_v = Vdot
             Vdot_l = 0.0
-        elif x <= 1e-12:   # effectively all liquid
+        elif x <= 1e-12:  # effectively all liquid
             Vdot_l = Vdot
             Vdot_v = 0.0
-        else:              # generic fallback
+        else:  # generic fallback
             Vdot_l = (1.0 - x) * Vdot
             Vdot_v = x * Vdot
 
-    j_liq = Vdot_l / A
-    j_gas = Vdot_v / A
+    j_liq = Vdot_l / max(A, 1e-12)
+    j_gas = Vdot_v / max(A, 1e-12)
 
-    # Phase densities for output
-    if is_two:
+    # ------------------------------------------------
+    # 6) Phase densities for output and void fraction
+    # ------------------------------------------------
+    if is_two and (rho_l is not None) and (rho_v is not None) and (0.0 < x < 1.0):
         rho_l_nhne = rho_l
         rho_v_nhne = rho_v
+
+        # Void fraction alpha_out from specific volumes
+        Vspec_v = x / max(rho_v, 1e-12)
+        Vspec_l = (1.0 - x) / max(rho_l, 1e-12)
+        alpha_out = Vspec_v / max(Vspec_v + Vspec_l, 1e-18)
     else:
-        if T_out > T_sat_p2 + 0.5:
-            rho_v_nhne = rho_singlephase_at_T(fluid, p2, T_out, side="gas")
+        # Monophasic: assign phase density and alpha_out ≈ 0 or 1
+        if T_out > (T_sat_p2 + 0.5):
             rho_l_nhne = None
+            rho_v_nhne = rho_singlephase_at_T(fluid, p2, T_out, side="gas")
+            alpha_out = 1.0
+            x = 1.0
         else:
             rho_l_nhne = rho_singlephase_at_T(fluid, p2, T_out, side="liq")
             rho_v_nhne = None
+            alpha_out = 0.0
+            x = 0.0
+
+    # Phase label
+    if is_two and (0.0 < x < 1.0):
+        phase_out = "two-phase"
+    else:
+        phase_out = "gas" if T_out > (T_sat_p2 + 0.5) else "liquid"
 
     return dict(
         T_out=T_out,
@@ -849,13 +871,8 @@ def nhne_out_state_from_mdot(
         j_gas=j_gas,
         rho_l=rho_l_nhne,
         rho_v=rho_v_nhne,
-        phase_out=(
-            "two-phase"
-            if is_two
-            else ("gas" if T_out > T_sat_p2 + 0.5 else "liquid")
-        ),
+        phase_out=phase_out,
     )
-
 
 # ======================================================================
 #                  DISCHARGE COEFFICIENT GEOMETRY MODEL
