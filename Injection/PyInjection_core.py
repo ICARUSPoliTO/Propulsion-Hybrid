@@ -237,19 +237,35 @@ def _mdot_hem(
     Cd: float,
 ) -> float:
     """
-    Minimal energetic HEM model (mass-flow only) with safety checks:
+    Homogeneous Equilibrium Model (HEM) mass-flow rate.
 
-      - h1 from (P1, T_line) or from saturated liquid (Q=0)
-      - iteration on h2 and rho(P2, H2)
+    Implementa direttamente la relazione di Waxman et al.:
 
-    In addition, we impose a physical upper bound:
-    the HEM mass flow rate cannot exceed the incompressible
-    single-phase SPI mass flow rate with the same Cd.
+        m_HEM = C_d * A * rho2 * sqrt(2 * (h1 - h2))
+
+    con condizione isentropica:
+
+        s1 = s2
+
+    Dove:
+      - h1, s1 sono calcolati allo stato a monte (P1, T_line)
+      - h2, rho2 sono calcolati allo stato a valle (P2, s = s1).
+
+    Per robustezza:
+      - se il calcolo isentropico fallisce, si ricade su un'ipotesi isoterma
+        (T_out = T_line) per h2 e rho2;
+      - si impone un limite superiore: m_HEM non può superare la portata
+        SPI incomprimibile con lo stesso Cd.
     """
     if D <= 0.0 or Cd <= 0.0 or p1_bar <= p2_bar:
         return 0.0
 
-    # --- Physical upper bound: incompressible SPI with same Cd ---
+    # Pressioni in Pa e area dell'orifizio
+    p1 = _pkey(p1_bar * 1e5)
+    p2 = _pkey(p2_bar * 1e5)
+    A = 0.25 * math.pi * D * D
+
+    # --- Portata SPI incomprimibile come upper bound fisico ---
     mdot_spi_upper = _mdot_spi(
         fluid=fluid,
         p1_bar=p1_bar,
@@ -257,53 +273,33 @@ def _mdot_hem(
         T_line=T_line,
         D=D,
         Cd=Cd,
-        use_compress=False,   # incompressible reference
+        use_compress=False,   # incompressibile
         n_isentropic=None,
     )
 
-    p1 = _pkey(p1_bar * 1e5)
-    p2 = _pkey(p2_bar * 1e5)
-    A = 0.25 * math.pi * D * D
-
-    # Upstream enthalpy
+    # --- Stato a monte: h1, s1 ---
     try:
         h1 = cp.PropsSI("H", "P", p1, "T", T_line, fluid)
+        s1 = cp.PropsSI("S", "P", p1, "T", T_line, fluid)
     except Exception:
-        # fallback: saturated liquid
+        # fallback: liquido saturo a P1
         h1 = cp.PropsSI("H", "P", p1, "Q", 0, fluid)
+        s1 = cp.PropsSI("S", "P", p1, "Q", 0, fluid)
 
-    # Initial guess: liquid at outlet
+    # --- Stato a valle isentropico: (P2, s = s1) ---
     try:
-        rho0 = cp.PropsSI("D", "P", p2, "Q", 0, fluid)
+        h2 = cp.PropsSI("H", "P", p2, "S", s1, fluid)
+        rho2 = cp.PropsSI("D", "P", p2, "S", s1, fluid)
     except Exception:
-        rho0 = _rho_single_at_T(fluid, p2, T_line, side="liq")
+        # fallback: isoterma (P2, T_line)
+        h2 = cp.PropsSI("H", "P", p2, "T", T_line, fluid)
+        rho2 = cp.PropsSI("D", "P", p2, "T", T_line, fluid)
 
-    mdot = Cd * A * math.sqrt(max(2.0 * rho0 * (p1 - p2), 0.0))
+    # --- Enthalpy drop e portata HEM ---
+    dh = max(h1 - h2, 0.0)         # deve essere positivo
+    mdot = Cd * A * rho2 * math.sqrt(2.0 * dh)
 
-    for _ in range(1000):
-        U = mdot / max(rho0 * A, 1e-12)
-        h2 = h1 - 0.5 * U * U
-
-        try:
-            rho = cp.PropsSI("D", "P", p2, "H", h2, fluid)
-        except Exception:
-            rho = rho0
-
-        try:
-            h_f2 = cp.PropsSI("H", "P", p2, "Q", 0, fluid)
-        except Exception:
-            h_f2 = h2
-
-        deltah = max(h2 - h_f2, 0.0)
-        mdot_new = Cd * A * rho * math.sqrt(max(2.0 * deltah, 0.0))
-
-        if abs(mdot_new - mdot) <= 1e-3 * max(mdot, 1.0):
-            mdot = mdot_new
-            break
-
-        mdot, rho0 = mdot_new, rho
-
-    # Final clamp: HEM cannot exceed incompressible SPI
+    # Clamp fisico: HEM non può superare la SPI incomprimibile
     mdot = max(mdot, 0.0)
     if mdot_spi_upper > 0.0 and mdot > mdot_spi_upper:
         mdot = mdot_spi_upper
