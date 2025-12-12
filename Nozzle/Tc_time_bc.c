@@ -3,16 +3,13 @@
 
 #define MAX_POINTS 200000
 
-/* =========================================================
-   TEMPERATURA Tc(t)
-   ========================================================= */
 static int nTc = 0;
 static real t_Tc[MAX_POINTS];
 static real Tc_tab[MAX_POINTS];
 
-/* interpolazione lineare Tc(t) */
 static real interp_Tc(real t)
 {
+    if (nTc < 1) return 300.0;
     if (nTc < 2) return Tc_tab[0];
 
     if (t <= t_Tc[0]) return Tc_tab[0];
@@ -28,7 +25,6 @@ static real interp_Tc(real t)
     return Tc_tab[nTc-1];
 }
 
-/* lettura CSV Tc(t) */
 DEFINE_ON_DEMAND(read_Tc_table)
 {
     FILE *fp = fopen("Tc_vs_time_K.csv", "r");
@@ -40,7 +36,7 @@ DEFINE_ON_DEMAND(read_Tc_table)
     char line[256];
     nTc = 0;
 
-    /* salta header */
+    /* header */
     fgets(line, sizeof(line), fp);
 
     while (fgets(line, sizeof(line), fp) && nTc < MAX_POINTS) {
@@ -53,10 +49,15 @@ DEFINE_ON_DEMAND(read_Tc_table)
     }
 
     fclose(fp);
-    Message("\n[UDF] Caricati %d punti di Tc(t)\n", nTc);
+
+    if (nTc > 0) {
+        Message("\n[UDF] Tc(t): caricati %d punti. t=[%g, %g] s\n",
+                nTc, t_Tc[0], t_Tc[nTc-1]);
+    } else {
+        Message("\n[UDF] ATTENZIONE: Tc(t) ha 0 punti!\n");
+    }
 }
 
-/* boundary condition: Total Temperature */
 DEFINE_PROFILE(Tc_time_bc, thread, i)
 {
     face_t f;
