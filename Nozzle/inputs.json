@@ -1,0 +1,55 @@
+{
+  "burn_time": 5,
+  "Tamb": 288,
+  "a": 0.00017,
+  "n": 0.5,
+  "rho_fuel": 850,
+  "Ainj": 8.01184666481737e-05,
+  "At": 0.0012566370614359172,
+  "Lc": 0.16,
+  "D_chamber": 0.1,
+  "z": 1,
+  "Vol_prechamber": 0,
+  "Vol_postchamber": 0,
+  "utilities": {
+    "CDvent": 0.75,
+    "Avent": 0,
+    "CDpress": 0.9,
+    "Apress": 0.0
+  },
+  "CD": 0.8,
+  "oxidizer": {
+    "OxidizerCP": "NitrousOxide",
+    "OxidizerCEA": "N2O",
+    "Weight fraction": "100",
+    "Exploded Formula": "",
+    "Temperature [K]": "",
+    "Specific Enthalpy [kj/mol]": ""
+  },
+  "fuel": {
+    "Fuels": [
+      "paraffin"
+    ],
+    "Weight fraction": [
+      "100"
+    ],
+    "Exploded Formula": [
+      "C 73 H 124"
+    ],
+    "Temperature [K]": [
+      533.0
+    ],
+    "Specific Enthalpy [kj/mol]": [
+      -1860.6
+    ]
+  },
+  "pressurant": null,
+  "rend_cstar": 0.85,
+  "rend_CF": 0.8,
+  "pitch": 0.0,
+  "circular": true,
+  "delay_time": 0.5,
+  "npointsperside": 50,
+  "constant_pressure_tank": false,
+  "tol": 0.001
+}
