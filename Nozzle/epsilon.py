@@ -104,7 +104,7 @@ def nozzle_expansion_ratio(
 if __name__ == "__main__":
 
     gamma = 1.26
-    pc_bar = 30.0
+    pc_bar = 27.0
     altitude_m = 100.0
 
     result = nozzle_expansion_ratio(
